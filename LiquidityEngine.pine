@@ -1,0 +1,505 @@
+//@version=6
+indicator("MAX SMC — Liquidity Engine", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+grpLiq       = "Liquidity"
+showLiq      = input.bool(true,  "Show Liquidity",             group=grpLiq)
+showBSL      = input.bool(true,  "Show Buy-Side Liquidity",    group=grpLiq)
+showSSL      = input.bool(true,  "Show Sell-Side Liquidity",   group=grpLiq)
+showSweeps   = input.bool(true,  "Show Swept Liquidity",       group=grpLiq)
+showTrendLiq = input.bool(true,  "Show Trendline Liquidity",   group=grpLiq)
+showHistLiq  = input.bool(true,  "Show Historical Liquidity",  group=grpLiq)
+liqTolATR    = input.float(0.15, "Liquidity Tolerance (ATR)",  group=grpLiq, step=0.01, minval=0.01)
+liqATRLen    = input.int(14,     "ATR Length",                 group=grpLiq, minval=1)
+minTouches   = input.int(2,      "Minimum Touches",            group=grpLiq, minval=2, maxval=10)
+
+// =============================================================================
+// SERIES — must run every bar unconditionally
+// =============================================================================
+atrVal    = ta.atr(liqATRLen)
+isBullish = close > open
+isBearish = close < open
+
+var int bearishCount = 0
+var int bullishCount = 0
+if isBearish
+    bearishCount += 1
+    bullishCount := 0
+else if isBullish
+    bullishCount += 1
+    bearishCount := 0
+else
+    bearishCount := 0
+    bullishCount := 0
+
+// =============================================================================
+// EXTERNAL SWING ENGINE — private copy, identical math to SwingPointsEngine
+// =============================================================================
+var int PHASE_STARTUP     = 0
+var int PHASE_RETRACEMENT = 1
+var int PHASE_EXPANSION   = 2
+
+var int   sw_phase      = PHASE_STARTUP
+var int   sw_trend      = 0
+var float sw_SH         = na
+var int   sw_SH_bar     = na
+var float sw_SL         = na
+var int   sw_SL_bar     = na
+var float sw_cand       = na
+var int   sw_cand_bar   = na
+
+// New-confirmation flags — reset every bar
+var bool  newSH         = false
+var bool  newSL         = false
+var float newSH_price   = na
+var int   newSH_bar     = na
+var float newSL_price   = na
+var int   newSL_bar     = na
+
+newSH := false
+newSL := false
+
+// STARTUP
+if sw_phase == PHASE_STARTUP
+    if na(sw_cand) or high > sw_cand
+        sw_cand     := high
+        sw_cand_bar := bar_index
+    if na(sw_SL) or low < sw_SL
+        sw_SL     := low
+        sw_SL_bar := bar_index
+    if bearishCount >= 3
+        sw_trend    := 1
+        sw_SH       := sw_cand
+        sw_SH_bar   := sw_cand_bar
+        newSH       := true
+        newSH_price := sw_SH
+        newSH_bar   := sw_SH_bar
+        newSL       := true
+        newSL_price := sw_SL
+        newSL_bar   := sw_SL_bar
+        sw_phase    := PHASE_RETRACEMENT
+    else if bullishCount >= 3
+        sw_trend    := -1
+        sw_SH       := sw_cand
+        sw_SH_bar   := sw_cand_bar
+        newSH       := true
+        newSH_price := sw_SH
+        newSH_bar   := sw_SH_bar
+        newSL       := true
+        newSL_price := sw_SL
+        newSL_bar   := sw_SL_bar
+        sw_phase    := PHASE_RETRACEMENT
+
+// RETRACEMENT
+else if sw_phase == PHASE_RETRACEMENT
+    if sw_trend == 1
+        if close > sw_SH
+            float minLow = low
+            int   minBar = bar_index
+            int   lb     = bar_index - sw_SH_bar
+            if lb > 0 and lb < 5000
+                for i = 0 to lb
+                    if low[i] < minLow
+                        minLow := low[i]
+                        minBar := bar_index[i]
+            sw_SL       := minLow
+            sw_SL_bar   := minBar
+            newSL       := true
+            newSL_price := sw_SL
+            newSL_bar   := sw_SL_bar
+            sw_phase    := PHASE_EXPANSION
+            sw_cand     := high
+            sw_cand_bar := bar_index
+        else if close < sw_SL
+            float maxHigh = high
+            int   maxBar  = bar_index
+            int   lb      = bar_index - sw_SL_bar
+            if lb > 0 and lb < 5000
+                for i = 0 to lb
+                    if high[i] > maxHigh
+                        maxHigh := high[i]
+                        maxBar  := bar_index[i]
+            sw_SH       := maxHigh
+            sw_SH_bar   := maxBar
+            newSH       := true
+            newSH_price := sw_SH
+            newSH_bar   := sw_SH_bar
+            sw_trend    := -1
+            sw_phase    := PHASE_EXPANSION
+            sw_cand     := low
+            sw_cand_bar := bar_index
+    else if sw_trend == -1
+        if close < sw_SL
+            float maxHigh = high
+            int   maxBar  = bar_index
+            int   lb      = bar_index - sw_SL_bar
+            if lb > 0 and lb < 5000
+                for i = 0 to lb
+                    if high[i] > maxHigh
+                        maxHigh := high[i]
+                        maxBar  := bar_index[i]
+            sw_SH       := maxHigh
+            sw_SH_bar   := maxBar
+            newSH       := true
+            newSH_price := sw_SH
+            newSH_bar   := sw_SH_bar
+            sw_phase    := PHASE_EXPANSION
+            sw_cand     := low
+            sw_cand_bar := bar_index
+        else if close > sw_SH
+            float minLow = low
+            int   minBar = bar_index
+            int   lb     = bar_index - sw_SH_bar
+            if lb > 0 and lb < 5000
+                for i = 0 to lb
+                    if low[i] < minLow
+                        minLow := low[i]
+                        minBar := bar_index[i]
+            sw_SL       := minLow
+            sw_SL_bar   := minBar
+            newSL       := true
+            newSL_price := sw_SL
+            newSL_bar   := sw_SL_bar
+            sw_trend    := 1
+            sw_phase    := PHASE_EXPANSION
+            sw_cand     := high
+            sw_cand_bar := bar_index
+
+// EXPANSION
+else if sw_phase == PHASE_EXPANSION
+    if sw_trend == 1
+        if close < sw_SL
+            sw_SH       := sw_cand
+            sw_SH_bar   := sw_cand_bar
+            newSH       := true
+            newSH_price := sw_SH
+            newSH_bar   := sw_SH_bar
+            sw_trend    := -1
+            sw_cand     := low
+            sw_cand_bar := bar_index
+        else
+            if high > sw_cand
+                sw_cand     := high
+                sw_cand_bar := bar_index
+            if bearishCount >= 3
+                sw_SH       := sw_cand
+                sw_SH_bar   := sw_cand_bar
+                newSH       := true
+                newSH_price := sw_SH
+                newSH_bar   := sw_SH_bar
+                sw_phase    := PHASE_RETRACEMENT
+    else if sw_trend == -1
+        if close > sw_SH
+            sw_SL       := sw_cand
+            sw_SL_bar   := sw_cand_bar
+            newSL       := true
+            newSL_price := sw_SL
+            newSL_bar   := sw_SL_bar
+            sw_trend    := 1
+            sw_cand     := high
+            sw_cand_bar := bar_index
+        else
+            if low < sw_cand
+                sw_cand     := low
+                sw_cand_bar := bar_index
+            if bullishCount >= 3
+                sw_SL       := sw_cand
+                sw_SL_bar   := sw_cand_bar
+                newSL       := true
+                newSL_price := sw_SL
+                newSL_bar   := sw_SL_bar
+                sw_phase    := PHASE_RETRACEMENT
+
+// =============================================================================
+// SWING POINT BUFFERS (rolling 50-point windows)
+// =============================================================================
+var float[] shPrices = array.new_float()
+var int[]   shBars   = array.new_int()
+var float[] slPrices = array.new_float()
+var int[]   slBars   = array.new_int()
+
+int MAX_BUF = 50
+
+if newSH
+    array.push(shPrices, newSH_price)
+    array.push(shBars,   newSH_bar)
+    if array.size(shPrices) > MAX_BUF
+        array.shift(shPrices)
+        array.shift(shBars)
+
+if newSL
+    array.push(slPrices, newSL_price)
+    array.push(slBars,   newSL_bar)
+    if array.size(slPrices) > MAX_BUF
+        array.shift(slPrices)
+        array.shift(slBars)
+
+// =============================================================================
+// LIQUIDITY ZONE UDT
+// =============================================================================
+type LiquidityZone
+    string liqType      // "BSL" | "SSL"
+    string liqKind      // "HORIZONTAL" | "TRENDLINE"
+    float  priceUpper
+    float  priceLower
+    int    touchCount
+    int    firstTouchBar
+    int    lastTouchBar
+    string state        // "ACTIVE" | "SWEPT" | "INVALIDATED"
+    int    sweepBar
+    line   vizLine
+    label  vizLabel
+
+var LiquidityZone[] zones = array.new<LiquidityZone>()
+int MAX_ZONES = 200
+
+// Colors
+colBSL      = color.new(color.teal,   15)
+colSSL      = color.new(color.orange, 15)
+colBSLSwept = color.new(color.teal,   70)
+colSSLSwept = color.new(color.orange, 70)
+colTLBSL    = color.new(color.aqua,   25)
+colTLSSL    = color.new(color.yellow, 25)
+
+// =============================================================================
+// HORIZONTAL LIQUIDITY DETECTION
+// Runs every time a new confirmed swing high/low is added to the buffer
+// =============================================================================
+
+// BSL: scan sh buffer for equal-high clusters
+if newSH and showLiq and showBSL and array.size(shPrices) >= 2
+    float nH  = newSH_price
+    int   nHB = newSH_bar
+    float tol = liqTolATR * atrVal
+    int   n   = array.size(shPrices)
+
+    for i = 0 to n - 2   // compare new point vs all previous
+        float cH  = array.get(shPrices, i)
+        int   cHB = array.get(shBars,   i)
+
+        if math.abs(nH - cH) <= tol
+            float upper = math.max(nH, cH)
+            float lower = math.min(nH, cH)
+
+            // Duplicate check
+            bool dup = false
+            if array.size(zones) > 0
+                for j = 0 to array.size(zones) - 1
+                    z = array.get(zones, j)
+                    if z.liqType == "BSL" and z.state == "ACTIVE" and z.liqKind == "HORIZONTAL"
+                        if math.abs(z.priceUpper - upper) <= tol
+                            // Merge: expand boundaries, increment touch
+                            z.priceUpper   := math.max(z.priceUpper, upper)
+                            z.priceLower   := math.min(z.priceLower, lower)
+                            z.touchCount   += 1
+                            z.lastTouchBar := nHB
+                            line.set_y1(z.vizLine, z.priceUpper)
+                            line.set_y2(z.vizLine, z.priceUpper)
+                            line.set_x2(z.vizLine, bar_index)
+                            label.set_x(z.vizLabel, bar_index)
+                            label.set_y(z.vizLabel, z.priceUpper)
+                            array.set(zones, j, z)
+                            dup := true
+                            break
+
+            if not dup
+                newLine = line.new(cHB, upper, bar_index, upper,
+                             color=colBSL, width=1, style=line.style_solid, extend=extend.none)
+                newLbl  = label.new(bar_index, upper, "BSL",
+                             style=label.style_none, textcolor=colBSL, size=size.tiny)
+                LiquidityZone z = LiquidityZone.new(
+                     liqType      = "BSL",
+                     liqKind      = "HORIZONTAL",
+                     priceUpper   = upper,
+                     priceLower   = lower,
+                     touchCount   = 2,
+                     firstTouchBar = cHB,
+                     lastTouchBar  = nHB,
+                     state         = "ACTIVE",
+                     sweepBar      = na,
+                     vizLine       = newLine,
+                     vizLabel      = newLbl)
+                if showLiq and showBSL
+                    array.push(zones, z)
+
+// SSL: scan sl buffer for equal-low clusters
+if newSL and showLiq and showSSL and array.size(slPrices) >= 2
+    float nL  = newSL_price
+    int   nLB = newSL_bar
+    float tol = liqTolATR * atrVal
+    int   n   = array.size(slPrices)
+
+    for i = 0 to n - 2
+        float cL  = array.get(slPrices, i)
+        int   cLB = array.get(slBars,   i)
+
+        if math.abs(nL - cL) <= tol
+            float upper = math.max(nL, cL)
+            float lower = math.min(nL, cL)
+
+            bool dup = false
+            if array.size(zones) > 0
+                for j = 0 to array.size(zones) - 1
+                    z = array.get(zones, j)
+                    if z.liqType == "SSL" and z.state == "ACTIVE" and z.liqKind == "HORIZONTAL"
+                        if math.abs(z.priceLower - lower) <= tol
+                            z.priceUpper   := math.max(z.priceUpper, upper)
+                            z.priceLower   := math.min(z.priceLower, lower)
+                            z.touchCount   += 1
+                            z.lastTouchBar := nLB
+                            line.set_y1(z.vizLine, z.priceLower)
+                            line.set_y2(z.vizLine, z.priceLower)
+                            line.set_x2(z.vizLine, bar_index)
+                            label.set_x(z.vizLabel, bar_index)
+                            label.set_y(z.vizLabel, z.priceLower)
+                            array.set(zones, j, z)
+                            dup := true
+                            break
+
+            if not dup
+                newLine = line.new(cLB, lower, bar_index, lower,
+                             color=colSSL, width=1, style=line.style_solid, extend=extend.none)
+                newLbl  = label.new(bar_index, lower, "SSL",
+                             style=label.style_none, textcolor=colSSL, size=size.tiny)
+                LiquidityZone z = LiquidityZone.new(
+                     liqType       = "SSL",
+                     liqKind       = "HORIZONTAL",
+                     priceUpper    = upper,
+                     priceLower    = lower,
+                     touchCount    = 2,
+                     firstTouchBar  = cLB,
+                     lastTouchBar   = nLB,
+                     state          = "ACTIVE",
+                     sweepBar       = na,
+                     vizLine        = newLine,
+                     vizLabel       = newLbl)
+                if showLiq and showSSL
+                    array.push(zones, z)
+
+// =============================================================================
+// TRENDLINE LIQUIDITY — 3-point diagonal alignment within tolerance
+// =============================================================================
+var int lastTLBSL_p0bar = na
+var int lastTLSSL_p0bar = na
+
+if showLiq and showTrendLiq and (newSH or newSL)
+
+    // BSL Trendline — 3 most recent swing highs
+    if array.size(shPrices) >= 3
+        int   n   = array.size(shPrices)
+        float p0H = array.get(shPrices, n - 3)
+        int   p0B = array.get(shBars,   n - 3)
+        float p1H = array.get(shPrices, n - 2)
+        int   p1B = array.get(shBars,   n - 2)
+        float p2H = array.get(shPrices, n - 1)
+        int   p2B = array.get(shBars,   n - 1)
+
+        if p2B != p0B  // avoid divide-by-zero
+            float slope   = (p2H - p0H) / (p2B - p0B)
+            float projP1  = p0H + slope * (p1B - p0B)
+            float tol     = liqTolATR * atrVal
+            bool  aligned = math.abs(p1H - projP1) <= tol
+            bool  newP0   = na(lastTLBSL_p0bar) or p0B != lastTLBSL_p0bar
+
+            if aligned and newP0
+                float endY = p2H + slope * (bar_index - p2B)
+                line.new(p0B, p0H, bar_index, endY,
+                     color=colTLBSL, width=1, style=line.style_dashed, extend=extend.none)
+                label.new(bar_index, endY, "TL BSL",
+                     style=label.style_none, textcolor=colTLBSL, size=size.tiny)
+                lastTLBSL_p0bar := p0B
+
+    // SSL Trendline — 3 most recent swing lows
+    if array.size(slPrices) >= 3
+        int   n   = array.size(slPrices)
+        float p0L = array.get(slPrices, n - 3)
+        int   p0B = array.get(slBars,   n - 3)
+        float p1L = array.get(slPrices, n - 2)
+        int   p1B = array.get(slBars,   n - 2)
+        float p2L = array.get(slPrices, n - 1)
+        int   p2B = array.get(slBars,   n - 1)
+
+        if p2B != p0B
+            float slope   = (p2L - p0L) / (p2B - p0B)
+            float projP1  = p0L + slope * (p1B - p0B)
+            float tol     = liqTolATR * atrVal
+            bool  aligned = math.abs(p1L - projP1) <= tol
+            bool  newP0   = na(lastTLSSL_p0bar) or p0B != lastTLSSL_p0bar
+
+            if aligned and newP0
+                float endY = p2L + slope * (bar_index - p2B)
+                line.new(p0B, p0L, bar_index, endY,
+                     color=colTLSSL, width=1, style=line.style_dashed, extend=extend.none)
+                label.new(bar_index, endY, "TL SSL",
+                     style=label.style_none, textcolor=colTLSSL, size=size.tiny)
+                lastTLSSL_p0bar := p0B
+
+// =============================================================================
+// ZONE LIFECYCLE — EXTEND, SWEEP DETECTION, PRUNE
+// Runs every bar
+// =============================================================================
+// Lifecycle loop — uses while to safely iterate backward (Pine v6 forbids by -1 in for loops)
+int _zSize = array.size(zones)
+int _zi    = _zSize - 1
+while _zi >= 0
+    LiquidityZone z = array.get(zones, _zi)
+
+    if z.state == "ACTIVE"
+        // Extend line to current bar
+        line.set_x2(z.vizLine, bar_index)
+        label.set_x(z.vizLabel, bar_index)
+
+        // Only show if minTouches threshold is met
+        bool touchOK = z.touchCount >= minTouches
+        if not touchOK
+            line.set_color(z.vizLine, color.new(color.white, 100))
+            label.set_text(z.vizLabel, "")
+        else
+            bool isVisible = showLiq and (z.liqType == "BSL" ? showBSL : showSSL)
+            color lineCol  = z.liqType == "BSL" ? colBSL : colSSL
+            if isVisible
+                line.set_color(z.vizLine,  lineCol)
+                label.set_text(z.vizLabel, z.liqType)
+                label.set_textcolor(z.vizLabel, lineCol)
+            else
+                line.set_color(z.vizLine, color.new(color.white, 100))
+                label.set_text(z.vizLabel, "")
+
+        // SWEEP CHECK
+        if z.touchCount >= minTouches and showSweeps
+            bool swept = false
+            if z.liqType == "BSL" and high > z.priceUpper
+                swept := true
+            else if z.liqType == "SSL" and low < z.priceLower
+                swept := true
+
+            if swept
+                z.state        := "SWEPT"
+                z.sweepBar     := bar_index
+                color sweptCol  = z.liqType == "BSL" ? colBSLSwept : colSSLSwept
+                line.set_color(z.vizLine,  sweptCol)
+                line.set_style(z.vizLine,  line.style_dotted)
+                label.set_text(z.vizLabel, z.liqType + " ✗")
+                label.set_textcolor(z.vizLabel, sweptCol)
+                line.set_x2(z.vizLine,  bar_index)
+                label.set_x(z.vizLabel, bar_index)
+
+        array.set(zones, _zi, z)
+
+    else if z.state == "SWEPT"
+        // Keep briefly visible post-sweep then prune after 500 bars
+        if not na(z.sweepBar) and (bar_index - z.sweepBar) > 500
+            line.delete(z.vizLine)
+            label.delete(z.vizLabel)
+            array.remove(zones, _zi)
+
+    _zi -= 1
+
+// Hard prune when array exceeds budget
+if array.size(zones) > MAX_ZONES
+    LiquidityZone oldest = array.get(zones, 0)
+    line.delete(oldest.vizLine)
+    label.delete(oldest.vizLabel)
+    array.remove(zones, 0)

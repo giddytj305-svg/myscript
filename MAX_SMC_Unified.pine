@@ -1,0 +1,915 @@
+//@version=6
+indicator("MAX SMC — Unified", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// =============================================================================
+// 1. MASTER SETTINGS
+// =============================================================================
+bool enableMaxSMC = input.bool(true, "Enable MAX SMC", group = "Master")
+
+// --- Structure ---
+bool showExtStruct = input.bool(true, "External Structure", group = "Structure")
+bool showIntStruct = input.bool(true, "Internal Structure", group = "Structure")
+bool showExtBOS    = input.bool(true, "External BOS", group = "Structure")
+bool showExtCHoCH  = input.bool(true, "External CHoCH", group = "Structure")
+bool showIntBOS    = input.bool(true, "Internal BOS", group = "Structure")
+bool showIntCHoCH  = input.bool(true, "Internal CHoCH", group = "Structure")
+
+// --- Trend ---
+bool showProTrend  = input.bool(true, "Pro Trend", group = "Trend")
+bool showCurTrend  = input.bool(true, "Current Trend", group = "Trend")
+bool showTrendAlign= input.bool(true, "Trend Alignment", group = "Trend")
+bool showTrendPnl  = input.bool(true, "Trend Status Panel", group = "Trend")
+bool showMTF       = input.bool(true, "Show MTF PRO Trends", group = "Trend")
+string tf1         = input.timeframe("240", "MTF Timeframe 1", group = "Trend")
+string tf2         = input.timeframe("60", "MTF Timeframe 2", group = "Trend")
+string tf3         = input.timeframe("1", "MTF Timeframe 3", group = "Trend")
+
+// --- POI ---
+bool showOB        = input.bool(true, "Order Blocks", group = "POI")
+bool showFVG       = input.bool(true, "FVG", group = "POI")
+bool showIFVG      = input.bool(true, "IFVG", group = "POI")
+
+// --- Liquidity ---
+bool showLiq       = input.bool(true, "Show Liquidity", group = "Liquidity")
+bool showBSL       = input.bool(true, "BSL", group = "Liquidity")
+bool showSSL       = input.bool(true, "SSL", group = "Liquidity")
+bool showSweeps    = input.bool(true, "Show Sweeps", group = "Liquidity")
+
+// --- Levels ---
+bool showPDH       = input.bool(true, "Previous Day High", group = "Levels")
+bool showPDL       = input.bool(true, "Previous Day Low", group = "Levels")
+
+// --- Sessions ---
+bool showAsian     = input.bool(true, "Asia", group = "Sessions")
+bool showPreLondon = input.bool(true, "Pre-London", group = "Sessions")
+bool showLondon    = input.bool(true, "London", group = "Sessions")
+bool showNY        = input.bool(true, "New York", group = "Sessions")
+
+// --- POI Colors ---
+color colBullFVG  = input.color(color.new(color.lime,   0), "Bullish FVG Color", group = "Colors")
+color colBearFVG  = input.color(color.new(color.red,    0), "Bearish FVG Color", group = "Colors")
+color colIFVG     = input.color(color.new(color.orange, 0), "IFVG Color", group = "Colors")
+color colOB       = input.color(color.new(color.yellow, 0), "Order Block Color", group = "Colors")
+
+// --- Session Colors ---
+color colorAsian     = input.color(color.new(color.blue, 85), "Asian Color", group = "Colors")
+color colorPreLondon = input.color(color.new(color.yellow, 85), "Pre-London Color", group = "Colors")
+color colorLondon    = input.color(color.new(color.orange, 85), "London Color", group = "Colors")
+color colorNY        = input.color(color.new(color.gray, 85), "New York Color", group = "Colors")
+
+// --- Parameters ---
+int   swingLength  = input.int(3, "External Swing Confirm length", group = "Parameters")
+int   intConfCount = input.int(2, "Internal Pullback Confirm count", group = "Parameters")
+int   atrPeriod    = input.int(14, "ATR Period", group = "Parameters")
+float intAtrMult   = input.float(0.5, "Internal ATR Mult", group = "Parameters")
+float liqTolerance = input.float(0.15, "Liquidity Tolerance (ATR ms)", group = "Parameters")
+int   minLiqTouch  = input.int(2, "Min Liquidity Touches", group = "Parameters")
+
+// =============================================================================
+// 2. GLOBAL SERIES & HELPER CALCS
+// =============================================================================
+float atrValue = ta.atr(atrPeriod)
+bool isBull = close > open
+bool isBear = close < open
+
+var int bullRun = 0
+var int bearRun = 0
+bullRun := isBull ? bullRun + 1 : 0
+bearRun := isBear ? bearRun + 1 : 0
+
+// =============================================================================
+// 3. SESSIONS
+// =============================================================================
+string tz = "Africa/Nairobi"
+bool inAsian     = not na(time(timeframe.period, "0200-0800:1234567", tz))
+bool inPreLondon = not na(time(timeframe.period, "0800-1000:1234567", tz))
+bool inLondon    = not na(time(timeframe.period, "1000-1900:1234567", tz))
+bool inNY        = not na(time(timeframe.period, "1500-0000:1234567", tz)) 
+
+var bool  asianActive = false
+var float asianHigh   = na
+var float asianLow    = na
+var int   asianStart  = na
+var box   asianBox    = na
+
+if enableMaxSMC and inAsian
+    if not asianActive
+        asianActive := true
+        asianHigh   := high
+        asianLow    := low
+        asianStart  := bar_index
+        if showAsian
+            asianBox := box.new(left = asianStart, top = asianHigh, bottom = asianLow, right = bar_index, bgcolor = colorAsian, border_color = color.new(colorAsian, 60))
+    else
+        asianHigh := math.max(asianHigh, high)
+        asianLow  := math.min(asianLow, low)
+        if showAsian
+            box.set_top(asianBox, asianHigh)
+            box.set_bottom(asianBox, asianLow)
+            box.set_right(asianBox, bar_index)
+else
+    if asianActive
+        asianActive := false
+
+var bool  preActive = false
+var float preHigh   = na
+var float preLow    = na
+var int   preStart  = na
+var box   preBox    = na
+
+if enableMaxSMC and inPreLondon
+    if not preActive
+        preActive := true
+        preHigh   := high
+        preLow    := low
+        preStart  := bar_index
+        if showPreLondon
+            preBox := box.new(left = preStart, top = preHigh, bottom = preLow, right = bar_index, bgcolor = colorPreLondon, border_color = color.new(colorPreLondon, 60))
+    else
+        preHigh := math.max(preHigh, high)
+        preLow  := math.min(preLow, low)
+        if showPreLondon
+            box.set_top(preBox, preHigh)
+            box.set_bottom(preBox, preLow)
+            box.set_right(preBox, bar_index)
+else
+    if preActive
+        preActive := false
+
+var bool  londonActive = false
+var float londonHigh   = na
+var float londonLow    = na
+var int   londonStart  = na
+var box   londonBox    = na
+
+if enableMaxSMC and inLondon
+    if not londonActive
+        londonActive := true
+        londonHigh   := high
+        londonLow    := low
+        londonStart  := bar_index
+        if showLondon
+            londonBox := box.new(left = londonStart, top = londonHigh, bottom = londonLow, right = bar_index, bgcolor = colorLondon, border_color = color.new(colorLondon, 60))
+    else
+        londonHigh := math.max(londonHigh, high)
+        londonLow  := math.min(londonLow, low)
+        if showLondon
+            box.set_top(londonBox, londonHigh)
+            box.set_bottom(londonBox, londonLow)
+            box.set_right(londonBox, bar_index)
+else
+    if londonActive
+        londonActive := false
+
+var bool  nyActive = false
+var float nyHigh   = na
+var float nyLow    = na
+var int   nyStart  = na
+var box   nyBox    = na
+
+if enableMaxSMC and inNY
+    if not nyActive
+        nyActive := true
+        nyHigh   := high
+        nyLow    := low
+        nyStart  := bar_index
+        if showNY
+            nyBox := box.new(left = nyStart, top = nyHigh, bottom = nyLow, right = bar_index, bgcolor = colorNY, border_color = color.new(colorNY, 60))
+    else
+        nyHigh := math.max(nyHigh, high)
+        nyLow  := math.min(nyLow, low)
+        if showNY
+            box.set_top(nyBox, nyHigh)
+            box.set_bottom(nyBox, nyLow)
+            box.set_right(nyBox, bar_index)
+else
+    if nyActive
+        nyActive := false
+
+// =============================================================================
+// PREVIOUS DAY HIGH / LOW
+// =============================================================================
+var float pdh = na
+var float pdl = na
+bool newDay = ta.change(time("D")) != 0
+if enableMaxSMC and newDay
+    pdh := high[1]
+    pdl := low[1]
+    // find strict day max/min manually if requested, but High[1] of Daily TF is exact.
+    pdh := request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+    pdl := request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+
+// Draw PDH PDL lines across the day
+var line pdhLine = na
+var line pdlLine = na
+if enableMaxSMC and showPDH and newDay
+    pdhLine := line.new(bar_index, pdh, bar_index, pdh, color=color.gray, style=line.style_dashed)
+if enableMaxSMC and showPDL and newDay
+    pdlLine := line.new(bar_index, pdl, bar_index, pdl, color=color.gray, style=line.style_dashed)
+if enableMaxSMC and showPDH and not na(pdhLine)
+    line.set_x2(pdhLine, bar_index)
+if enableMaxSMC and showPDL and not na(pdlLine)
+    line.set_x2(pdlLine, bar_index)
+
+// =============================================================================
+// 4. EXTERNAL STRUCTURE ENGINE (Pro Trend & BOS/CHoCH)
+// =============================================================================
+var int   phase      = 0
+var int   trend      = 0
+var float ext_SH     = na
+var int   ext_SH_bar = na
+var float ext_SL     = na
+var int   ext_SL_bar = na
+var float cand       = na
+var int   candBar    = na
+
+var float scanLow     = na
+var int   scanLowBar  = na
+var float scanHigh    = na
+var int   scanHighBar = na
+
+// Helpers for Drawing
+f_draw_SH(int bar, float price) =>
+    if showExtStruct
+        label.new(x = bar, y = price, text = "SH", color = color.new(color.white, 100), textcolor = color.red, style = label.style_none, size = size.small)
+
+f_draw_SL(int bar, float price) =>
+    if showExtStruct
+        label.new(x = bar, y = price, text = "SL", color = color.new(color.white, 100), textcolor = color.green, style = label.style_none, size = size.small)
+
+f_draw_break(int barStart, float priceLevel, int barEnd, string txt, bool bullish) =>
+    bool shouldDraw = true
+    if bullish and not showExtBOS and txt=="BOS"
+        shouldDraw := false
+    if not bullish and not showExtBOS and txt=="BOS"
+        shouldDraw := false
+    if bullish and not showExtCHoCH and txt=="CHoCH"
+        shouldDraw := false
+    if not bullish and not showExtCHoCH and txt=="CHoCH"
+        shouldDraw := false
+        
+    if shouldDraw
+        color col = bullish ? color.new(color.teal, 0) : color.new(color.maroon, 0)
+        line.new(x1 = barStart, y1 = priceLevel, x2 = barEnd, y2 = priceLevel, color = col, style = line.style_solid)
+        label.new(x = int((barStart + barEnd)/2), y = priceLevel, text = txt, color = color.new(color.white,100), textcolor = col, style = label.style_none, size = size.small)
+
+if enableMaxSMC
+    if phase == 0   
+        if na(cand) or high > cand
+            cand    := high
+            candBar := bar_index
+        if na(ext_SL) or low < ext_SL
+            ext_SL     := low
+            ext_SL_bar := bar_index
+        if bearRun >= swingLength
+            trend  := 1
+            ext_SH := cand
+            ext_SH_bar := candBar
+            f_draw_SH(ext_SH_bar, ext_SH)
+            phase   := 1
+            cand    := low
+            candBar := bar_index
+        else if bullRun >= swingLength
+            trend      := -1
+            ext_SL     := cand
+            ext_SL_bar := candBar
+            f_draw_SL(ext_SL_bar, ext_SL)
+            phase   := 1
+            cand    := high
+            candBar := bar_index
+
+    else if phase == 1   
+        if trend == 1
+            if close > ext_SH
+                f_draw_break(ext_SH_bar, ext_SH, bar_index, "CHoCH", true)
+                scanLow    := low
+                scanLowBar := bar_index
+                int lb1 = math.min(bar_index - ext_SH_bar, 4999)
+                for k = 0 to lb1
+                    if low[k] < scanLow
+                        scanLow    := low[k]
+                        scanLowBar := bar_index - k
+                ext_SL     := scanLow
+                ext_SL_bar := scanLowBar
+                f_draw_SL(ext_SL_bar, ext_SL)
+                phase   := 2
+                cand    := high
+                candBar := bar_index
+            else if close < ext_SL
+                f_draw_break(ext_SL_bar, ext_SL, bar_index, "BOS", false)
+                trend       := -1
+                scanHigh    := high
+                scanHighBar := bar_index
+                int lb2 = math.min(bar_index - ext_SL_bar, 4999)
+                for k = 0 to lb2
+                    if high[k] > scanHigh
+                        scanHigh    := high[k]
+                        scanHighBar := bar_index - k
+                ext_SH     := scanHigh
+                ext_SH_bar := scanHighBar
+                f_draw_SH(ext_SH_bar, ext_SH)
+                phase   := 2
+                cand    := low
+                candBar := bar_index
+        else if trend == -1
+            if close < ext_SL
+                f_draw_break(ext_SL_bar, ext_SL, bar_index, "CHoCH", false)
+                scanHigh    := high
+                scanHighBar := bar_index
+                int lb3 = math.min(bar_index - ext_SL_bar, 4999)
+                for k = 0 to lb3
+                    if high[k] > scanHigh
+                        scanHigh    := high[k]
+                        scanHighBar := bar_index - k
+                ext_SH     := scanHigh
+                ext_SH_bar := scanHighBar
+                f_draw_SH(ext_SH_bar, ext_SH)
+                phase   := 2
+                cand    := low
+                candBar := bar_index
+            else if close > ext_SH
+                f_draw_break(ext_SH_bar, ext_SH, bar_index, "BOS", true)
+                trend      := 1
+                scanLow    := low
+                scanLowBar := bar_index
+                int lb4 = math.min(bar_index - ext_SH_bar, 4999)
+                for k = 0 to lb4
+                    if low[k] < scanLow
+                        scanLow    := low[k]
+                        scanLowBar := bar_index - k
+                ext_SL     := scanLow
+                ext_SL_bar := scanLowBar
+                f_draw_SL(ext_SL_bar, ext_SL)
+                phase   := 2
+                cand    := high
+                candBar := bar_index
+
+    else if phase == 2   
+        if trend == 1
+            if high > cand
+                cand    := high
+                candBar := bar_index
+            if bearRun >= swingLength
+                ext_SH     := cand
+                ext_SH_bar := candBar
+                f_draw_SH(ext_SH_bar, ext_SH)
+                phase   := 1
+                cand    := low
+                candBar := bar_index
+            else if close < ext_SL
+                f_draw_break(ext_SL_bar, ext_SL, bar_index, "BOS", false)
+                trend := -1
+                cand    := low
+                candBar := bar_index
+        else if trend == -1
+            if low < cand
+                cand    := low
+                candBar := bar_index
+            if bullRun >= swingLength
+                ext_SL     := cand
+                ext_SL_bar := candBar
+                f_draw_SL(ext_SL_bar, ext_SL)
+                phase   := 1
+                cand    := high
+                candBar := bar_index
+            else if close > ext_SH
+                f_draw_break(ext_SH_bar, ext_SH, bar_index, "BOS", true)
+                trend := 1
+                cand    := high
+                candBar := bar_index
+
+// =============================================================================
+// 5. INTERNAL STRUCTURE ENGINE (Current Trend & iBOS/iCHoCH)
+// =============================================================================
+var float int_SH = na
+var int   int_SH_bar = na
+var float int_SL = na
+var int   int_SL_bar = na
+
+var float cand_int_price = na
+var int   cand_int_bar = na
+var int   int_phase = 0 
+var int   int_trend = 0
+
+var int bullishCount = 0
+var int bearishCount = 0
+bullishCount := close > open ? bullishCount + 1 : 0
+bearishCount := close < open ? bearishCount + 1 : 0
+
+f_draw_ISH(int bar, float price, int lastLblBar) =>
+    if showIntStruct
+        if not na(lastLblBar) and bar == lastLblBar
+            bar
+        else
+            label.new(x = bar, y = price, text = "x", color = color.new(color.white, 100), textcolor = color.fuchsia, style = label.style_none, size = size.tiny)
+            bar
+    else
+        lastLblBar
+
+f_draw_ISL(int bar, float price, int lastLblBar) =>
+    if showIntStruct
+        if not na(lastLblBar) and bar == lastLblBar
+            bar
+        else
+            label.new(x = bar, y = price, text = "x", color = color.new(color.white, 100), textcolor = color.lime, style = label.style_none, size = size.tiny)
+            bar
+    else
+        lastLblBar
+
+f_draw_int_break(int barStart, float priceLevel, int barEnd, string txt, bool bullish) =>
+    bool shouldDraw = true
+    if bullish and not showIntBOS and txt=="iBOS"
+        shouldDraw := false
+    if not bullish and not showIntBOS and txt=="iBOS"
+        shouldDraw := false
+    if bullish and not showIntCHoCH and txt=="iCHoCH"
+        shouldDraw := false
+    if not bullish and not showIntCHoCH and txt=="iCHoCH"
+        shouldDraw := false
+        
+    if shouldDraw
+        color col = bullish ? color.new(color.aqua, 20) : color.new(color.fuchsia, 20)
+        line.new(x1 = barStart, y1 = priceLevel, x2 = barEnd, y2 = priceLevel, color = col, style = line.style_dotted)
+        label.new(x = int((barStart + barEnd)/2), y = priceLevel, text = txt, color = color.new(color.white,100), textcolor = col, style = label.style_none, size = size.tiny)
+
+var int last_drawn_ISH_bar = na
+var int last_drawn_ISL_bar = na
+
+if enableMaxSMC
+    if int_phase == 0 // STARTUP
+        if na(cand_int_price) or high > cand_int_price
+            cand_int_price := high
+            cand_int_bar := bar_index
+        if na(int_SL) or low < int_SL
+            int_SL := low
+            int_SL_bar := bar_index
+        
+        if bearishCount >= intConfCount
+            int_trend := 1
+            int_SH := cand_int_price
+            int_SH_bar := cand_int_bar
+            last_drawn_ISH_bar := f_draw_ISH(int_SH_bar, int_SH, last_drawn_ISH_bar)
+            int_phase := -1 
+            cand_int_price := low
+            cand_int_bar := bar_index
+        else if bullishCount >= intConfCount
+            int_trend := -1
+            int_SL := cand_int_price
+            int_SL_bar := bar_index
+            last_drawn_ISL_bar := f_draw_ISL(int_SL_bar, int_SL, last_drawn_ISL_bar)
+            int_phase := 1 
+            cand_int_price := high
+            cand_int_bar := bar_index
+
+    else if int_phase == 1 // TRACKING HIGH
+        if high > cand_int_price
+            cand_int_price := high
+            cand_int_bar := bar_index
+            
+        if bearishCount >= intConfCount
+            float legFromISL = not na(int_SL) ? cand_int_price - int_SL : cand_int_price - cand_int_price
+            if na(int_SL) or legFromISL >= intAtrMult * atrValue
+                int_SH := cand_int_price
+                int_SH_bar := cand_int_bar
+                last_drawn_ISH_bar := f_draw_ISH(int_SH_bar, int_SH, last_drawn_ISH_bar)
+                int_phase := -1 
+                cand_int_price := low
+                cand_int_bar := bar_index
+
+    else if int_phase == -1 // TRACKING LOW
+        if low < cand_int_price
+            cand_int_price := low
+            cand_int_bar := bar_index
+            
+        if bullishCount >= intConfCount
+            float legFromISH = not na(int_SH) ? int_SH - cand_int_price : cand_int_price - cand_int_price
+            if na(int_SH) or legFromISH >= intAtrMult * atrValue
+                int_SL := cand_int_price
+                int_SL_bar := cand_int_bar
+                last_drawn_ISL_bar := f_draw_ISL(int_SL_bar, int_SL, last_drawn_ISL_bar)
+                int_phase := 1 
+                cand_int_price := high
+                cand_int_bar := bar_index
+
+    if not na(int_SH) and not na(int_SL)
+        if int_trend == 1
+            if close > int_SH
+                f_draw_int_break(int_SH_bar, int_SH, bar_index, "iBOS", true)
+                int_trend := 1
+                int_SH := na 
+            else if close < int_SL
+                f_draw_int_break(int_SL_bar, int_SL, bar_index, "iCHoCH", false)
+                int_trend := -1
+                int_SL := na
+                
+        else if int_trend == -1
+            if close < int_SL
+                f_draw_int_break(int_SL_bar, int_SL, bar_index, "iBOS", false)
+                int_trend := -1
+                int_SL := na
+            else if close > int_SH
+                f_draw_int_break(int_SH_bar, int_SH, bar_index, "iCHoCH", true)
+                int_trend := 1
+                int_SH := na
+
+
+// =============================================================================
+// 6. TREND CLASSIFICATION ENGINE
+// =============================================================================
+bool extNewSH = not na(ext_SH) and ext_SH != ext_SH[1]
+bool extNewSL = not na(ext_SL) and ext_SL != ext_SL[1]
+bool intNewSH = not na(int_SH) and (na(int_SH[1]) or int_SH != int_SH[1])
+bool intNewSL = not na(int_SL) and (na(int_SL[1]) or int_SL != int_SL[1])
+
+var float prev_ext_SH_val = na
+var float prev_ext_SL_val = na
+var string ext_SH_class   = na   
+var string ext_SL_class   = na   
+
+if enableMaxSMC
+    if extNewSH
+        if not na(prev_ext_SH_val)
+            ext_SH_class := ext_SH > prev_ext_SH_val ? "HH" : "LH"
+        prev_ext_SH_val := ext_SH
+
+    if extNewSL
+        if not na(prev_ext_SL_val)
+            ext_SL_class := ext_SL > prev_ext_SL_val ? "HL" : "LL"
+        prev_ext_SL_val := ext_SL
+
+var float prev_int_SH_val = na
+var float prev_int_SL_val = na
+var string int_SH_class   = na  
+var string int_SL_class   = na   
+
+if enableMaxSMC
+    if intNewSH
+        if not na(prev_int_SH_val)
+            int_SH_class := int_SH > prev_int_SH_val ? "HH" : "LH"
+        prev_int_SH_val := int_SH
+
+    if intNewSL
+        if not na(prev_int_SL_val)
+            int_SL_class := int_SL > prev_int_SL_val ? "HL" : "LL"
+        prev_int_SL_val := int_SL
+
+var string proTrend = "NEUTRAL"
+if enableMaxSMC
+    if trend == 1
+        proTrend := "BULLISH"
+    else if trend == -1
+        proTrend := "BEARISH"
+
+var string curTrend = "NEUTRAL"
+if enableMaxSMC
+    if int_trend == 1
+        curTrend := "BULLISH"
+    else if int_trend == -1
+        curTrend := "BEARISH"
+
+string alignment = "UNDEFINED"
+if enableMaxSMC
+    if proTrend == "BULLISH" and curTrend == "BULLISH"
+        alignment := "WITH TREND ▲"
+    else if proTrend == "BEARISH" and curTrend == "BEARISH"
+        alignment := "WITH TREND ▼"
+    else if proTrend == "BULLISH" and curTrend == "BEARISH"
+        alignment := "COUNTER TREND"
+    else if proTrend == "BEARISH" and curTrend == "BULLISH"
+        alignment := "COUNTER TREND"
+
+// =============================================================================
+// 7. POI ENGINE (OB, FVG, IFVG)
+// =============================================================================
+type POI
+    int    poiId
+    string poiType
+    int    direction
+    float  top
+    float  bottom
+    int    creationBar
+    int    state      // 0 = active, 1 = invalidated (converted to IFVG)
+    int    origFvgId
+    color  poiColor
+    label  lbl
+
+var array<POI> allPOIs = array.new<POI>()
+var int poiCnt = 0
+
+var int ifvgHitB = -1
+var int ifvgHitN = -1
+
+if enableMaxSMC
+    ifvgHitB := -1
+    ifvgHitN := -1
+
+    if bar_index >= 2
+        bool bulFvg  = high[2] < low
+        bool bearFvg = low[2] > high
+
+        if bulFvg
+            float gapTop = low
+            float gapBot = high[2]
+            float midY   = (gapTop + gapBot) / 2
+            
+            int aSz = array.size(allPOIs)
+            if aSz > 0
+                for i = aSz - 1 to 0
+                    POI p = array.get(allPOIs, i)
+                    if p.poiType == "FVG" and p.direction == -1 and p.state == 0
+                        bool overlaps = gapBot < p.top and gapTop > p.bottom
+                        if overlaps and close > p.top and ifvgHitN == -1
+                            ifvgHitN := i
+
+            if ifvgHitN >= 0
+                POI targ = array.get(allPOIs, ifvgHitN)
+                targ.state := 1 // invalidate original
+                if not na(targ.lbl)
+                    label.delete(targ.lbl)
+                label lb = na
+                if showIFVG
+                    lb := label.new(x = bar_index[1], y = midY, text = "IFVG", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(color.black, 100), textcolor = colIFVG, style = label.style_none, size = size.normal)
+                poiCnt += 1
+                array.push(allPOIs, POI.new(poiCnt, "IFVG", 1, gapTop, gapBot, bar_index, 0, targ.poiId, colIFVG, lb))
+            else
+                label lb = na
+                if showFVG
+                    lb := label.new(x = bar_index[1], y = midY, text = "FVG", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(color.black, 100), textcolor = colBullFVG, style = label.style_none, size = size.normal)
+                poiCnt += 1
+                array.push(allPOIs, POI.new(poiCnt, "FVG", 1, gapTop, gapBot, bar_index, 0, 0, colBullFVG, lb))
+
+        if bearFvg
+            float gapTop = low[2]
+            float gapBot = high
+            float midY   = (gapTop + gapBot) / 2
+            
+            int aSz = array.size(allPOIs)
+            if aSz > 0
+                for i = aSz - 1 to 0
+                    POI p = array.get(allPOIs, i)
+                    if p.poiType == "FVG" and p.direction == 1 and p.state == 0
+                        bool overlaps = gapBot < p.top and gapTop > p.bottom
+                        if overlaps and close < p.bottom and ifvgHitB == -1
+                            ifvgHitB := i
+
+            if ifvgHitB >= 0
+                POI targ = array.get(allPOIs, ifvgHitB)
+                targ.state := 1 // invalidate original
+                if not na(targ.lbl)
+                    label.delete(targ.lbl)
+                label lb = na
+                if showIFVG
+                    lb := label.new(x = bar_index[1], y = midY, text = "IFVG", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(color.black, 100), textcolor = colIFVG, style = label.style_none, size = size.normal)
+                poiCnt += 1
+                array.push(allPOIs, POI.new(poiCnt, "IFVG", -1, gapTop, gapBot, bar_index, 0, targ.poiId, colIFVG, lb))
+            else
+                label lb = na
+                if showFVG
+                    lb := label.new(x = bar_index[1], y = midY, text = "FVG", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(color.black, 100), textcolor = colBearFVG, style = label.style_none, size = size.normal)
+                poiCnt += 1
+                array.push(allPOIs, POI.new(poiCnt, "FVG", -1, gapTop, gapBot, bar_index, 0, 0, colBearFVG, lb))
+
+    var bool  obFound = false
+    var float obH     = na
+    var float obL     = na
+    var int   obWin   = 0
+    var int   obDir   = 0
+    obFound := false
+    obH     := na
+    obL     := na
+    obWin   := 0
+    obDir   := 0
+    
+    if bar_index > 20
+        if bullRun == 3 and close > close[1] and close[1] > close[2]
+            float mxH = high[3]
+            float mnL = low[3]
+            for i = 3 to 6
+                mxH := math.max(mxH, high[i])
+                mnL := math.min(mnL, low[i])
+            float consolRange = mxH - mnL
+            float expRange    = close - close[2] 
+            if expRange > consolRange * 0.5 and consolRange < atrValue * 1.5
+                obFound := true
+                obH     := high[3]
+                obL     := low[3]
+                obWin   := 3
+                obDir   := 1
+
+        if bearRun == 3 and close < close[1] and close[1] < close[2]
+            float mxH = high[3]
+            float mnL = low[3]
+            for i = 3 to 6
+                mxH := math.max(mxH, high[i])
+                mnL := math.min(mnL, low[i])
+            float consolRange = mxH - mnL
+            float expRange    = close[2] - close
+            if expRange > consolRange * 0.5 and consolRange < atrValue * 1.5
+                obFound := true
+                obH     := high[3]
+                obL     := low[3]
+                obWin   := 3
+                obDir   := -1
+
+        float pLow  = ta.pivotlow(low, 2, 2)
+        float pHigh = ta.pivothigh(high, 2, 2)
+        if trend == 1 and not na(pLow)
+            obFound := true
+            obH     := high[2]
+            obL     := low[2]
+            obWin   := 2
+            obDir   := 1
+        if trend == -1 and not na(pHigh)
+            obFound := true
+            obH     := high[2]
+            obL     := low[2]
+            obWin   := 2
+            obDir   := -1
+
+    if obFound
+        poiCnt += 1
+        float  obMid  = (obH + obL) / 2
+        label  lb     = na
+        if showOB
+            lb := label.new(x = bar_index[obWin], y = obMid, text = "OB", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(color.black, 100), textcolor = colOB, style = label.style_none, size = size.normal)
+        array.push(allPOIs, POI.new(poiCnt, "OB", obDir, obH, obL, bar_index, 0, 0, colOB, lb))
+
+    if array.size(allPOIs) > 400
+        POI old = array.shift(allPOIs)
+        if not na(old.lbl)
+            label.delete(old.lbl)
+
+
+// =============================================================================
+// 8. LIQUIDITY MAPPER
+// =============================================================================
+color colBSL       = color.new(color.fuchsia, 30)
+color colSSL       = color.new(color.fuchsia, 30)
+color colBSLSwept  = color.new(color.maroon, 40)
+color colSSLSwept  = color.new(color.maroon, 40)
+
+type LiquidityZone
+    string liqType       // "BSL" or "SSL"
+    float  basePrice     
+    float  priceUpper    
+    float  priceLower    
+    int    startBar      
+    int    touchCount    
+    string state         // "ACTIVE" or "SWEPT"
+    int    sweepBar      
+    line   vizLine
+    label  vizLabel
+
+var array<LiquidityZone> zones = array.new<LiquidityZone>()
+
+f_merge_or_create(string type_, float price, int bar) =>
+    float pUpper = price + (liqTolerance * atrValue)
+    float pLower = price - (liqTolerance * atrValue)
+    bool  merged = false
+
+    int sz = array.size(zones)
+    if sz > 0
+        for i = 0 to sz - 1
+            LiquidityZone z = array.get(zones, i)
+            if z.state == "ACTIVE" and z.liqType == type_
+                if price <= z.priceUpper and price >= z.priceLower
+                    z.touchCount := z.touchCount + 1
+                    array.set(zones, i, z)
+                    merged := true
+                    break
+
+    if not merged
+        line  l = line.new(bar, price, bar, price, color = color.new(color.white, 100), style = line.style_solid)
+        label lbl = label.new(bar, price, text = "", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(color.white, 100), style = label.style_none, size = size.tiny)
+        array.push(zones, LiquidityZone.new(type_, price, pUpper, pLower, bar, 1, "ACTIVE", na, l, lbl))
+
+if enableMaxSMC
+    if extNewSH
+        f_merge_or_create("BSL", ext_SH, ext_SH_bar)
+    if extNewSL
+        f_merge_or_create("SSL", ext_SL, ext_SL_bar)
+
+    int _zSize = array.size(zones)
+    int _zi    = _zSize - 1
+    while _zi >= 0
+        LiquidityZone z = array.get(zones, _zi)
+
+        if z.state == "ACTIVE"
+            line.set_x2(z.vizLine, bar_index)
+            label.set_x(z.vizLabel, bar_index)
+
+            bool touchOK = z.touchCount >= minLiqTouch
+            if not touchOK
+                line.set_color(z.vizLine, color.new(color.white, 100))
+                label.set_text(z.vizLabel, "")
+            else
+                bool isVisible = showLiq and (z.liqType == "BSL" ? showBSL : showSSL)
+                color lineCol  = z.liqType == "BSL" ? colBSL : colSSL
+                if isVisible
+                    line.set_color(z.vizLine,  lineCol)
+                    label.set_text(z.vizLabel, z.liqType)
+                    label.set_textcolor(z.vizLabel, lineCol)
+                else
+                    line.set_color(z.vizLine, color.new(color.white, 100))
+                    label.set_text(z.vizLabel, "")
+
+            if z.touchCount >= minLiqTouch and showSweeps
+                bool swept = false
+                if z.liqType == "BSL" and high > z.priceUpper
+                    swept := true
+                else if z.liqType == "SSL" and low < z.priceLower
+                    swept := true
+                if swept
+                    z.state        := "SWEPT"
+                    z.sweepBar     := bar_index
+                    color sweptCol  = z.liqType == "BSL" ? colBSLSwept : colSSLSwept
+                    line.set_color(z.vizLine,  sweptCol)
+                    line.set_style(z.vizLine,  line.style_dotted)
+                    label.set_text(z.vizLabel, z.liqType + " ✗")
+                    label.set_textcolor(z.vizLabel, sweptCol)
+                    line.set_x2(z.vizLine,  bar_index)
+                    label.set_x(z.vizLabel, bar_index)
+
+            array.set(zones, _zi, z)
+
+        else if z.state == "SWEPT"
+            if not na(z.sweepBar) and (bar_index - z.sweepBar) > 500
+                line.delete(z.vizLine)
+                label.delete(z.vizLabel)
+                array.remove(zones, _zi)
+
+        _zi -= 1
+
+    if array.size(zones) > 200
+        LiquidityZone oldest = array.get(zones, 0)
+        line.delete(oldest.vizLine)
+        label.delete(oldest.vizLabel)
+        array.remove(zones, 0)
+
+
+// =============================================================================
+// 9. STATUS PANEL
+// =============================================================================
+color pnlColBull   = color.new(#00c853, 10)
+color pnlColBear   = color.new(#d50000, 10)
+color pnlColNeut   = color.new(color.gray, 30)
+color pnlColAmber  = color.new(#ff8f00, 15)
+color pnlColHdr    = color.new(#0d1b2a, 5)
+color pnlColRow    = color.new(#0a0e18, 25)
+
+color proCol   = proTrend == "BULLISH" ? pnlColBull : proTrend  == "BEARISH" ? pnlColBear : pnlColNeut
+color curCol   = curTrend == "BULLISH" ? pnlColBull : curTrend  == "BEARISH" ? pnlColBear : pnlColNeut
+color alignCol = alignment == "WITH TREND ▲" or alignment == "WITH TREND ▼" ? pnlColBull :
+                 alignment == "COUNTER TREND" ? pnlColAmber : pnlColNeut
+
+f_format_tf(string tf) =>
+    tf == "1" ? "1M" : tf == "3" ? "3M" : tf == "5" ? "5M" : tf == "15" ? "15M" :
+      tf == "30" ? "30M" : tf == "45" ? "45M" : tf == "60" ? "1H" : tf == "120" ? "2H" :
+      tf == "240" ? "4H" : tf == "D" or tf == "1D" ? "1D" : tf == "W" or tf == "1W" ? "1W" : tf
+
+string mtfPro1 = request.security(syminfo.tickerid, tf1, proTrend)
+string mtfPro2 = request.security(syminfo.tickerid, tf2, proTrend)
+string mtfPro3 = request.security(syminfo.tickerid, tf3, proTrend)
+
+color colMtf1 = mtfPro1 == "BULLISH" ? pnlColBull : mtfPro1 == "BEARISH" ? pnlColBear : pnlColNeut
+color colMtf2 = mtfPro2 == "BULLISH" ? pnlColBull : mtfPro2 == "BEARISH" ? pnlColBear : pnlColNeut
+color colMtf3 = mtfPro3 == "BULLISH" ? pnlColBull : mtfPro3 == "BEARISH" ? pnlColBear : pnlColNeut
+
+var table trendPanel = table.new(
+     position     = position.top_right,
+     columns      = 3,
+     rows         = 5,
+     bgcolor      = color.new(#0d1b2a, 5),
+     border_color = color.new(color.gray, 55),
+     border_width = 1,
+     frame_color  = color.new(color.gray, 45),
+     frame_width  = 1)
+
+if enableMaxSMC and showTrendPnl
+    table.cell(trendPanel, 0, 0, "⬡  MAX SMC", text_color = color.new(color.white, 5), text_size = size.small, bgcolor = pnlColHdr, text_halign = text.align_center)
+    table.merge_cells(trendPanel, 0, 0, 2, 0)
+    
+    table.cell(trendPanel, 0, 1, "PRO TREND", text_color = color.new(color.silver, 15), text_size = size.tiny, bgcolor = pnlColRow, text_halign = text.align_center)
+    table.cell(trendPanel, 1, 1, "CURRENT", text_color = color.new(color.silver, 15), text_size = size.tiny, bgcolor = pnlColRow, text_halign = text.align_center)
+    table.cell(trendPanel, 2, 1, "ALIGNMENT", text_color = color.new(color.silver, 15), text_size = size.tiny, bgcolor = pnlColRow, text_halign = text.align_center)
+    
+    table.cell(trendPanel, 0, 2, proTrend, text_color = color.white, text_size = size.small, bgcolor = proCol, text_halign = text.align_center)
+    table.cell(trendPanel, 1, 2, curTrend, text_color = color.white, text_size = size.small, bgcolor = curCol, text_halign = text.align_center)
+    
+    string alignTxt = alignment == "WITH TREND ▲" or alignment == "WITH TREND ▼" ? "IN SYNC" : "COUNTER"
+    table.cell(trendPanel, 2, 2, alignTxt, text_color = color.white, text_size = size.small, bgcolor = alignCol, text_halign = text.align_center)
+    
+    if showMTF
+        table.cell(trendPanel, 0, 3, f_format_tf(tf1) + " PRO", text_color = color.new(color.silver, 15), text_size = size.tiny, bgcolor = pnlColRow, text_halign = text.align_center)
+        table.cell(trendPanel, 1, 3, f_format_tf(tf2) + " PRO", text_color = color.new(color.silver, 15), text_size = size.tiny, bgcolor = pnlColRow, text_halign = text.align_center)
+        table.cell(trendPanel, 2, 3, f_format_tf(tf3) + " PRO", text_color = color.new(color.silver, 15), text_size = size.tiny, bgcolor = pnlColRow, text_halign = text.align_center)
+        
+        table.cell(trendPanel, 0, 4, mtfPro1, text_color = color.white, text_size = size.small, bgcolor = colMtf1, text_halign = text.align_center)
+        table.cell(trendPanel, 1, 4, mtfPro2, text_color = color.white, text_size = size.small, bgcolor = colMtf2, text_halign = text.align_center)
+        table.cell(trendPanel, 2, 4, mtfPro3, text_color = color.white, text_size = size.small, bgcolor = colMtf3, text_halign = text.align_center)
+    else
+        table.clear(trendPanel, 0, 3, 2, 4)
+
+else if not showTrendPnl
+    table.clear(trendPanel, 0, 0, 2, 4)
+

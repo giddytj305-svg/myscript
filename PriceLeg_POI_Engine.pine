@@ -1,0 +1,455 @@
+//@version=6
+indicator("MAX SMC — Price Leg & POI Engine", overlay = true, max_labels_count = 500)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+showOB      = input.bool(true,  "Show Order Blocks")
+showFVG     = input.bool(true,  "Show Fair Value Gaps")
+showIFVG    = input.bool(true,  "Show Inverse Fair Value Gaps")
+
+colBullFVG  = input.color(color.new(color.lime,   0), "Bullish FVG Color")
+colBearFVG  = input.color(color.new(color.red,    0), "Bearish FVG Color")
+colIFVG     = input.color(color.new(color.orange, 0), "IFVG Color")
+colOB       = input.color(color.new(color.yellow, 0), "Order Block Color")
+atrLen      = input.int(14,  "ATR Period")
+
+// =============================================================================
+// SERIES (unconditional every bar)
+// =============================================================================
+float atr14 = ta.atr(atrLen)
+float vol20 = ta.sma(volume, 20)
+
+bool isBull = close > open
+bool isBear = close < open
+
+var int bullRun = 0
+var int bearRun = 0
+bullRun := isBull ? bullRun + 1 : 0
+bearRun := isBear ? bearRun + 1 : 0
+
+// =============================================================================
+// USER-DEFINED TYPES
+// =============================================================================
+type PriceLeg
+    int   id
+    int   direction
+    float startPrice
+    float endPrice
+    int   startBar
+    int   endBar
+    bool  active
+
+type POI
+    int    poiId
+    string poiType
+    int    direction
+    int    legId
+    float  top
+    float  bottom
+    int    creationBar
+    int    state      // 0 = active, 1 = invalidated (converted to IFVG)
+    int    origFvgId
+    color  poiColor
+    label  lbl
+
+// =============================================================================
+// TOP-LEVEL VAR DECLARATIONS
+// =============================================================================
+var array<PriceLeg> allLegs  = array.new<PriceLeg>()
+var array<POI>      allPOIs  = array.new<POI>()
+var int  legCnt  = 0
+var int  poiCnt  = 0
+
+// Structure state machine
+var int   phase      = 0
+var int   trend      = 0
+var float ext_SH     = na
+var int   ext_SH_bar = na
+var float ext_SL     = na
+var int   ext_SL_bar = na
+var float cand       = na
+var int   candBar    = na
+
+// Top-level scan vars
+var float scanLow     = na
+var int   scanLowBar  = na
+var float scanHigh    = na
+var int   scanHighBar = na
+
+// OB scan state
+var bool  obFound = false
+var float obH     = na
+var float obL     = na
+var int   obWin   = 0
+var int   obDir   = 0
+obFound := false
+obH     := na
+obL     := na
+obWin   := 0
+obDir   := 0
+
+var int ifvgHitB = -1
+var int ifvgHitN = -1
+
+// =============================================================================
+// STRUCTURE ENGINE (Restored to maintain curLegId assignment mechanically)
+// =============================================================================
+if phase == 0   // STARTUP
+    if na(cand) or high > cand
+        cand    := high
+        candBar := bar_index
+    if na(ext_SL) or low < ext_SL
+        ext_SL     := low
+        ext_SL_bar := bar_index
+    if bearRun >= 3
+        trend  := 1
+        ext_SH := cand
+        ext_SH_bar := candBar
+        legCnt += 1
+        array.push(allLegs, PriceLeg.new(legCnt, -1, cand, na, candBar, na, true))
+        phase   := 1
+        cand    := low
+        candBar := bar_index
+    else if bullRun >= 3
+        trend      := -1
+        ext_SL     := cand
+        ext_SL_bar := candBar
+        legCnt += 1
+        array.push(allLegs, PriceLeg.new(legCnt, 1, cand, na, candBar, na, true))
+        phase   := 1
+        cand    := high
+        candBar := bar_index
+
+else if phase == 1   // RETRACEMENT
+    if trend == 1
+        if close > ext_SH
+            scanLow    := low
+            scanLowBar := bar_index
+            int lb1 = math.min(bar_index - ext_SH_bar, 4999)
+            for k = 0 to lb1
+                if low[k] < scanLow
+                    scanLow    := low[k]
+                    scanLowBar := bar_index - k
+            ext_SL     := scanLow
+            ext_SL_bar := scanLowBar
+            if array.size(allLegs) > 0
+                PriceLeg prev = array.last(allLegs)
+                if prev.active
+                    prev.active   := false
+                    prev.endPrice := scanLow
+                    prev.endBar   := scanLowBar
+            legCnt += 1
+            array.push(allLegs, PriceLeg.new(legCnt, 1, scanLow, na, scanLowBar, na, true))
+            phase   := 2
+            cand    := high
+            candBar := bar_index
+        else if close < ext_SL
+            trend       := -1
+            scanHigh    := high
+            scanHighBar := bar_index
+            int lb2 = math.min(bar_index - ext_SL_bar, 4999)
+            for k = 0 to lb2
+                if high[k] > scanHigh
+                    scanHigh    := high[k]
+                    scanHighBar := bar_index - k
+            ext_SH     := scanHigh
+            ext_SH_bar := scanHighBar
+            if array.size(allLegs) > 0
+                PriceLeg prev = array.last(allLegs)
+                if prev.active
+                    prev.active   := false
+                    prev.endPrice := scanHigh
+                    prev.endBar   := scanHighBar
+            legCnt += 1
+            array.push(allLegs, PriceLeg.new(legCnt, -1, scanHigh, na, scanHighBar, na, true))
+            phase   := 2
+            cand    := low
+            candBar := bar_index
+    else if trend == -1
+        if close < ext_SL
+            scanHigh    := high
+            scanHighBar := bar_index
+            int lb3 = math.min(bar_index - ext_SL_bar, 4999)
+            for k = 0 to lb3
+                if high[k] > scanHigh
+                    scanHigh    := high[k]
+                    scanHighBar := bar_index - k
+            ext_SH     := scanHigh
+            ext_SH_bar := scanHighBar
+            if array.size(allLegs) > 0
+                PriceLeg prev = array.last(allLegs)
+                if prev.active
+                    prev.active   := false
+                    prev.endPrice := scanHigh
+                    prev.endBar   := scanHighBar
+            legCnt += 1
+            array.push(allLegs, PriceLeg.new(legCnt, -1, scanHigh, na, scanHighBar, na, true))
+            phase   := 2
+            cand    := low
+            candBar := bar_index
+        else if close > ext_SH
+            trend      := 1
+            scanLow    := low
+            scanLowBar := bar_index
+            int lb4 = math.min(bar_index - ext_SH_bar, 4999)
+            for k = 0 to lb4
+                if low[k] < scanLow
+                    scanLow    := low[k]
+                    scanLowBar := bar_index - k
+            ext_SL     := scanLow
+            ext_SL_bar := scanLowBar
+            if array.size(allLegs) > 0
+                PriceLeg prev = array.last(allLegs)
+                if prev.active
+                    prev.active   := false
+                    prev.endPrice := scanLow
+                    prev.endBar   := scanLowBar
+            legCnt += 1
+            array.push(allLegs, PriceLeg.new(legCnt, 1, scanLow, na, scanLowBar, na, true))
+            phase   := 2
+            cand    := high
+            candBar := bar_index
+
+else if phase == 2   // EXPANSION
+    if trend == 1
+        if high > cand
+            cand    := high
+            candBar := bar_index
+        if bearRun >= 3
+            ext_SH     := cand
+            ext_SH_bar := candBar
+            if array.size(allLegs) > 0
+                PriceLeg prev = array.last(allLegs)
+                if prev.active
+                    prev.active   := false
+                    prev.endPrice := cand
+                    prev.endBar   := candBar
+            legCnt += 1
+            array.push(allLegs, PriceLeg.new(legCnt, -1, cand, na, candBar, na, true))
+            phase   := 1
+            cand    := low
+            candBar := bar_index
+        else if close < ext_SL
+            trend := -1
+            if array.size(allLegs) > 0
+                PriceLeg prev = array.last(allLegs)
+                if prev.active
+                    prev.active   := false
+                    prev.endPrice := cand
+                    prev.endBar   := candBar
+            legCnt += 1
+            array.push(allLegs, PriceLeg.new(legCnt, -1, cand, na, candBar, na, true))
+            cand    := low
+            candBar := bar_index
+    else if trend == -1
+        if low < cand
+            cand    := low
+            candBar := bar_index
+        if bullRun >= 3
+            ext_SL     := cand
+            ext_SL_bar := candBar
+            if array.size(allLegs) > 0
+                PriceLeg prev = array.last(allLegs)
+                if prev.active
+                    prev.active   := false
+                    prev.endPrice := cand
+                    prev.endBar   := candBar
+            legCnt += 1
+            array.push(allLegs, PriceLeg.new(legCnt, 1, cand, na, candBar, na, true))
+            phase   := 1
+            cand    := high
+            candBar := bar_index
+        else if close > ext_SH
+            trend := 1
+            if array.size(allLegs) > 0
+                PriceLeg prev = array.last(allLegs)
+                if prev.active
+                    prev.active   := false
+                    prev.endPrice := cand
+                    prev.endBar   := candBar
+            legCnt += 1
+            array.push(allLegs, PriceLeg.new(legCnt, 1, cand, na, candBar, na, true))
+            cand    := high
+            candBar := bar_index
+
+int curLegId = array.size(allLegs) > 0 ? array.last(allLegs).id : 0
+
+// =============================================================================
+// FVG + IFVG ENGINE (Integrated with POI standard pool)
+// =============================================================================
+ifvgHitB := -1
+ifvgHitN := -1
+
+if bar_index >= 2
+    bool bulFvg  = high[2] < low
+    bool bearFvg = low[2] > high
+
+    if bulFvg
+        float gapTop = low
+        float gapBot = high[2]
+        float midY   = (gapTop + gapBot) / 2
+
+        int aSz = array.size(allPOIs)
+        if aSz > 0
+            for i = aSz - 1 to 0
+                POI p = array.get(allPOIs, i)
+                if p.poiType == "FVG" and p.direction == -1 and p.state == 0
+                    bool overlaps = gapBot < p.top and gapTop > p.bottom
+                    if overlaps and close > p.top and ifvgHitN == -1
+                        ifvgHitN := i
+
+        if ifvgHitN >= 0
+            POI targ = array.get(allPOIs, ifvgHitN)
+            targ.state := 1 // invalidate original
+            if not na(targ.lbl)
+                label.delete(targ.lbl)
+            label lb = na
+            if showIFVG
+                lb := label.new(x = bar_index[1], y = midY, text = "IFVG",
+                     xloc      = xloc.bar_index,
+                     yloc      = yloc.price,
+                     color     = color.new(color.black, 100),
+                     textcolor = colIFVG,
+                     style     = label.style_none,
+                     size      = size.normal)
+            poiCnt += 1
+            array.push(allPOIs, POI.new(poiCnt, "IFVG", 1, curLegId, gapTop, gapBot, bar_index, 0, targ.poiId, colIFVG, lb))
+        else
+            label lb = na
+            if showFVG
+                lb := label.new(x = bar_index[1], y = midY, text = "FVG",
+                     xloc      = xloc.bar_index,
+                     yloc      = yloc.price,
+                     color     = color.new(color.black, 100),
+                     textcolor = colBullFVG,
+                     style     = label.style_none,
+                     size      = size.normal)
+            poiCnt += 1
+            array.push(allPOIs, POI.new(poiCnt, "FVG", 1, curLegId, gapTop, gapBot, bar_index, 0, 0, colBullFVG, lb))
+
+    if bearFvg
+        float gapTop = low[2]
+        float gapBot = high
+        float midY   = (gapTop + gapBot) / 2
+
+        int aSz = array.size(allPOIs)
+        if aSz > 0
+            for i = aSz - 1 to 0
+                POI p = array.get(allPOIs, i)
+                if p.poiType == "FVG" and p.direction == 1 and p.state == 0
+                    bool overlaps = gapBot < p.top and gapTop > p.bottom
+                    if overlaps and close < p.bottom and ifvgHitB == -1
+                        ifvgHitB := i
+
+        if ifvgHitB >= 0
+            POI targ = array.get(allPOIs, ifvgHitB)
+            targ.state := 1 // invalidate original
+            if not na(targ.lbl)
+                label.delete(targ.lbl)
+            label lb = na
+            if showIFVG
+                lb := label.new(x = bar_index[1], y = midY, text = "IFVG",
+                     xloc      = xloc.bar_index,
+                     yloc      = yloc.price,
+                     color     = color.new(color.black, 100),
+                     textcolor = colIFVG,
+                     style     = label.style_none,
+                     size      = size.normal)
+            poiCnt += 1
+            array.push(allPOIs, POI.new(poiCnt, "IFVG", -1, curLegId, gapTop, gapBot, bar_index, 0, targ.poiId, colIFVG, lb))
+        else
+            label lb = na
+            if showFVG
+                lb := label.new(x = bar_index[1], y = midY, text = "FVG",
+                     xloc      = xloc.bar_index,
+                     yloc      = yloc.price,
+                     color     = color.new(color.black, 100),
+                     textcolor = colBearFVG,
+                     style     = label.style_none,
+                     size      = size.normal)
+            poiCnt += 1
+            array.push(allPOIs, POI.new(poiCnt, "FVG", -1, curLegId, gapTop, gapBot, bar_index, 0, 0, colBearFVG, lb))
+
+// =============================================================================
+// ORDER BLOCK ENGINE (Expansion + Swing Points)
+// =============================================================================
+if bar_index > 20
+    // 1. Aggressive 3-candle breakout OBs
+    if bullRun == 3 and close > close[1] and close[1] > close[2]
+        float mxH = high[3]
+        float mnL = low[3]
+        for i = 3 to 6
+            mxH := math.max(mxH, high[i])
+            mnL := math.min(mnL, low[i])
+        float consolRange = mxH - mnL
+        float expRange    = close - close[2] 
+        if expRange > consolRange * 0.5 and consolRange < atr14 * 1.5
+            obFound := true
+            obH     := high[3]
+            obL     := low[3]
+            obWin   := 3
+            obDir   := 1
+
+    if bearRun == 3 and close < close[1] and close[1] < close[2]
+        float mxH = high[3]
+        float mnL = low[3]
+        for i = 3 to 6
+            mxH := math.max(mxH, high[i])
+            mnL := math.min(mnL, low[i])
+        float consolRange = mxH - mnL
+        float expRange    = close[2] - close
+        if expRange > consolRange * 0.5 and consolRange < atr14 * 1.5
+            obFound := true
+            obH     := high[3]
+            obL     := low[3]
+            obWin   := 3
+            obDir   := -1
+
+    // 2. Swing Point OBs 
+    // Captures pivot points based on the actively calculated market trend
+    float pLow  = ta.pivotlow(low, 2, 2)
+    float pHigh = ta.pivothigh(high, 2, 2)
+    
+    // Bullish Market -> Swing Lows act as OBs
+    if trend == 1 and not na(pLow)
+        obFound := true
+        obH     := high[2]
+        obL     := low[2]
+        obWin   := 2
+        obDir   := 1
+
+    // Bearish Market -> Swing Highs act as OBs
+    if trend == -1 and not na(pHigh)
+        obFound := true
+        obH     := high[2]
+        obL     := low[2]
+        obWin   := 2
+        obDir   := -1
+
+// Mechanics for rendering the found OB:
+if obFound
+    poiCnt += 1
+    float  obMid  = (obH + obL) / 2
+    label  lb     = na
+    if showOB
+        lb := label.new(x = bar_index[obWin], y = obMid, text = "OB",
+             xloc      = xloc.bar_index,
+             yloc      = yloc.price,
+             color     = color.new(color.black, 100),
+             textcolor = colOB,
+             style     = label.style_none,
+             size      = size.normal)
+    // Add to unified POI pool assigning it strictly to the current price leg
+    array.push(allPOIs, POI.new(poiCnt, "OB", obDir, curLegId, obH, obL, bar_index, 0, 0, colOB, lb))
+
+// =============================================================================
+// UNIFIED POOL PRUNING — Delete old elements to maintain TradingView compliance
+// =============================================================================
+if array.size(allPOIs) > 450
+    POI old = array.shift(allPOIs)
+    if not na(old.lbl)
+        label.delete(old.lbl)
+
+if array.size(allLegs) > 50
+    array.shift(allLegs)

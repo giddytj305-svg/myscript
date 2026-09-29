@@ -1,0 +1,594 @@
+//@version=6
+indicator("MAX SMC — Swing Points Engine", overlay = true, max_labels_count = 500, max_lines_count = 500)
+
+// --- User Inputs ---
+showSH = input.bool(true, title = "Show Swing Highs", group = "External Structure")
+showSL = input.bool(true, title = "Show Swing Lows", group = "External Structure")
+showLines = input.bool(true, title = "Show Break Lines (BOS/CHoCH)", group = "External Structure")
+
+showISH = input.bool(true, title = "Show Internal SH", group = "Internal Structure")
+showISL = input.bool(true, title = "Show Internal SL", group = "Internal Structure")
+showInternalLines = input.bool(true, title = "Show Internal Break Lines", group = "Internal Structure")
+intConfCount = input.int(2, title = "Internal Consec Candle Count", group = "Internal Structure", tooltip="Lowering this (e.g. to 2 or 1) makes internal tracking highly sensitive.")
+intAtrMult = input.float(0.5, title = "Internal Min Displacement (ATR mult)", group = "Internal Structure", step = 0.1, tooltip="The tracked leg must move at least this multiple of ATR(14) before an ISH/ISL is confirmed. Raise to filter out chop, lower to increase sensitivity.")
+intAtrLen  = input.int(14, title = "ATR Length for Displacement Filter", group = "Internal Structure")
+
+// --- ATR for Internal Displacement Filter ---
+atrValue = ta.atr(intAtrLen)
+
+// --- Definitions & Consecutive Counts ---
+isBullish = close > open
+isBearish = close < open
+
+var int bearishCount = 0
+var int bullishCount = 0
+
+if isBearish
+    bearishCount += 1
+    bullishCount := 0
+else if isBullish
+    bullishCount += 1
+    bearishCount := 0
+else
+    bearishCount := 0
+    bullishCount := 0
+
+// --- Structure Engine State Variables ---
+var int PHASE_STARTUP = 0
+var int PHASE_RETRACEMENT = 1
+var int PHASE_EXPANSION = 2
+
+// 1. EXTERNAL Variables
+var int phase = PHASE_STARTUP
+var int trend = 0 // 1 = Bullish, -1 = Bearish
+
+var float ext_SH = na
+var int   ext_SH_bar = na
+var float ext_SL = na
+var int   ext_SL_bar = na
+
+var float cand_ext_price = na
+var int   cand_ext_bar = na
+
+var int last_drawn_SH_bar = na
+var int last_drawn_SL_bar = na
+
+// 2. INTERNAL Variables (Continuous ZigZag Engine)
+var int int_phase = PHASE_STARTUP // 0=Startup, 1=Tracking High, -1=Tracking Low
+var int int_trend = 0 // 1 = Bullish, -1 = Bearish
+
+var float int_SH = na
+var int   int_SH_bar = na
+var float int_SL = na
+var int   int_SL_bar = na
+
+var float cand_int_price = na
+var int   cand_int_bar = na
+var float tmp_int_SL = na // Temporary hold for startup
+var int   tmp_int_SL_bar = na
+
+var int last_drawn_ISH_bar = na
+var int last_drawn_ISL_bar = na
+
+// --- Drawing Helpers ---
+f_draw_SH(_bar, _price, _last_drawn) =>
+    int newly_drawn = _last_drawn
+    if showSH and (na(_last_drawn) or _bar != _last_drawn)
+        label.new(_bar, _price, "SH", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+        newly_drawn := _bar
+    newly_drawn
+
+f_draw_SL(_bar, _price, _last_drawn) =>
+    int newly_drawn = _last_drawn
+    if showSL and (na(_last_drawn) or _bar != _last_drawn)
+        label.new(_bar, _price, "SL", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+        newly_drawn := _bar
+    newly_drawn
+
+f_draw_ISH(_bar, _price, _last_drawn) =>
+    int newly_drawn = _last_drawn
+    if showISH and (na(_last_drawn) or _bar != _last_drawn)
+        label.new(_bar, _price, "ISH", style=label.style_label_down, color=color.new(color.red, 40), textcolor=color.white, size=size.tiny)
+        newly_drawn := _bar
+    newly_drawn
+
+f_draw_ISL(_bar, _price, _last_drawn) =>
+    int newly_drawn = _last_drawn
+    if showISL and (na(_last_drawn) or _bar != _last_drawn)
+        label.new(_bar, _price, "ISL", style=label.style_label_up, color=color.new(color.green, 40), textcolor=color.white, size=size.tiny)
+        newly_drawn := _bar
+    newly_drawn
+
+f_draw_break(_x1, _y1, _x2, _type, _isBullish) =>
+    if showLines
+        lineColor = _isBullish ? color.new(color.green, 20) : color.new(color.red, 20)
+        line.new(_x1, _y1, _x2, _y1, color=lineColor, width=1, style=line.style_dashed)
+        label.new(math.round((_x1 + _x2) / 2), _y1, _type, style=label.style_none, textcolor=lineColor, size=size.tiny)
+
+f_draw_int_break(_x1, _y1, _x2, _type, _isBullish) =>
+    if showInternalLines
+        lineColor = _isBullish ? color.new(color.green, 50) : color.new(color.red, 50)
+        line.new(_x1, _y1, _x2, _y1, color=lineColor, width=1, style=line.style_dotted)
+        label.new(math.round((_x1 + _x2) / 2), _y1, _type, style=label.style_none, textcolor=lineColor, size=size.tiny)
+
+// --- Engine Execution ---
+
+// =============================================================================
+// EXTERNAL ENGINE
+// =============================================================================
+
+// 1. Startup Phase 
+if phase == PHASE_STARTUP
+    if na(cand_ext_price) or high > cand_ext_price
+        cand_ext_price := high
+        cand_ext_bar := bar_index
+    if na(ext_SL) or low < ext_SL
+        ext_SL := low
+        ext_SL_bar := bar_index
+
+    if bearishCount >= 3
+        trend := 1 
+        ext_SH := cand_ext_price
+        ext_SH_bar := cand_ext_bar
+        last_drawn_SH_bar := f_draw_SH(ext_SH_bar, ext_SH, last_drawn_SH_bar)
+        
+        last_drawn_SL_bar := f_draw_SL(ext_SL_bar, ext_SL, last_drawn_SL_bar)
+        phase := PHASE_RETRACEMENT
+        
+        // INTERNAL RESET BOUNDARY
+        int_phase := PHASE_STARTUP
+        cand_int_price := na
+        tmp_int_SL := na
+        int_SH := na
+        int_SL := na
+        
+    else if bullishCount >= 3
+        trend := -1 
+        ext_SH := cand_ext_price
+        ext_SH_bar := cand_ext_bar
+        last_drawn_SL_bar := f_draw_SL(ext_SL_bar, ext_SL, last_drawn_SL_bar)
+        
+        last_drawn_SH_bar := f_draw_SH(ext_SH_bar, ext_SH, last_drawn_SH_bar)
+        phase := PHASE_RETRACEMENT
+        
+        // INTERNAL RESET BOUNDARY
+        int_phase := PHASE_STARTUP
+        cand_int_price := na
+        tmp_int_SL := na
+        int_SH := na
+        int_SL := na
+
+// 2. Main Logic
+else if phase == PHASE_RETRACEMENT
+    if trend == 1
+        if close > ext_SH // Bullish Break of Structure
+            f_draw_break(ext_SH_bar, ext_SH, bar_index, "BOS", true)
+            
+            float minLow = low
+            int minBar = bar_index
+            int lookback = bar_index - ext_SH_bar
+            if lookback > 0 and lookback < 5000
+                for i = 0 to lookback
+                    if low[i] < minLow
+                        minLow := low[i]
+                        minBar := bar_index[i]
+            
+            ext_SL := minLow
+            ext_SL_bar := minBar
+            last_drawn_SL_bar := f_draw_SL(ext_SL_bar, ext_SL, last_drawn_SL_bar)
+            
+            phase := PHASE_EXPANSION
+            cand_ext_price := high
+            cand_ext_bar := bar_index
+            
+            // INTERNAL RESET BOUNDARY
+            int_phase := PHASE_STARTUP
+            cand_int_price := na
+            tmp_int_SL := na
+            int_SH := na
+            int_SL := na
+            
+        else if close < ext_SL // Bearish CHoCH
+            f_draw_break(ext_SL_bar, ext_SL, bar_index, "CHoCH", false)
+            trend := -1
+            
+            float maxHigh = high
+            int maxBar = bar_index
+            int lookback = bar_index - ext_SL_bar
+            if lookback > 0 and lookback < 5000
+                for i = 0 to lookback
+                    if high[i] > maxHigh
+                        maxHigh := high[i]
+                        maxBar := bar_index[i]
+            
+            ext_SH := maxHigh
+            ext_SH_bar := maxBar
+            last_drawn_SH_bar := f_draw_SH(ext_SH_bar, ext_SH, last_drawn_SH_bar)
+            
+            phase := PHASE_EXPANSION
+            cand_ext_price := low
+            cand_ext_bar := bar_index
+            
+            // INTERNAL RESET BOUNDARY
+            int_phase := PHASE_STARTUP
+            cand_int_price := na
+            tmp_int_SL := na
+            int_SH := na
+            int_SL := na
+
+    else if trend == -1
+        if close < ext_SL // Bearish Break of Structure
+            f_draw_break(ext_SL_bar, ext_SL, bar_index, "BOS", false)
+            
+            float maxHigh = high
+            int maxBar = bar_index
+            int lookback = bar_index - ext_SL_bar
+            if lookback > 0 and lookback < 5000
+                for i = 0 to lookback
+                    if high[i] > maxHigh
+                        maxHigh := high[i]
+                        maxBar := bar_index[i]
+                        
+            ext_SH := maxHigh
+            ext_SH_bar := maxBar
+            last_drawn_SH_bar := f_draw_SH(ext_SH_bar, ext_SH, last_drawn_SH_bar)
+            
+            phase := PHASE_EXPANSION
+            cand_ext_price := low
+            cand_ext_bar := bar_index
+            
+            // INTERNAL RESET BOUNDARY
+            int_phase := PHASE_STARTUP
+            cand_int_price := na
+            tmp_int_SL := na
+            int_SH := na
+            int_SL := na
+            
+        else if close > ext_SH // Bullish CHoCH
+            f_draw_break(ext_SH_bar, ext_SH, bar_index, "CHoCH", true)
+            trend := 1
+            
+            float minLow = low
+            int minBar = bar_index
+            int lookback = bar_index - ext_SH_bar
+            if lookback > 0 and lookback < 5000
+                for i = 0 to lookback
+                    if low[i] < minLow
+                        minLow := low[i]
+                        minBar := bar_index[i]
+                        
+            ext_SL := minLow
+            ext_SL_bar := minBar
+            last_drawn_SL_bar := f_draw_SL(ext_SL_bar, ext_SL, last_drawn_SL_bar)
+            
+            phase := PHASE_EXPANSION
+            cand_ext_price := high
+            cand_ext_bar := bar_index
+            
+            // INTERNAL RESET BOUNDARY
+            int_phase := PHASE_STARTUP
+            cand_int_price := na
+            tmp_int_SL := na
+            int_SH := na
+            int_SL := na
+
+else if phase == PHASE_EXPANSION
+    if trend == 1
+        if close < ext_SL
+            f_draw_break(ext_SL_bar, ext_SL, bar_index, "CHoCH", false)
+            trend := -1
+            ext_SH := cand_ext_price
+            ext_SH_bar := cand_ext_bar
+            last_drawn_SH_bar := f_draw_SH(ext_SH_bar, ext_SH, last_drawn_SH_bar)
+            
+            cand_ext_price := low
+            cand_ext_bar := bar_index
+            
+            // INTERNAL RESET BOUNDARY
+            int_phase := PHASE_STARTUP
+            cand_int_price := na
+            tmp_int_SL := na
+            int_SH := na
+            int_SL := na
+            
+        else
+            if high > cand_ext_price
+                cand_ext_price := high
+                cand_ext_bar := bar_index
+                
+            if bearishCount >= 3
+                ext_SH := cand_ext_price
+                ext_SH_bar := cand_ext_bar
+                last_drawn_SH_bar := f_draw_SH(ext_SH_bar, ext_SH, last_drawn_SH_bar)
+                phase := PHASE_RETRACEMENT
+                
+                // INTERNAL RESET BOUNDARY
+                int_phase := PHASE_STARTUP
+                cand_int_price := na
+                tmp_int_SL := na
+                int_SH := na
+                int_SL := na
+            
+    else if trend == -1
+        if close > ext_SH
+            f_draw_break(ext_SH_bar, ext_SH, bar_index, "CHoCH", true)
+            trend := 1
+            ext_SL := cand_ext_price
+            ext_SL_bar := cand_ext_bar
+            last_drawn_SL_bar := f_draw_SL(ext_SL_bar, ext_SL, last_drawn_SL_bar)
+            
+            cand_ext_price := high
+            cand_ext_bar := bar_index
+            
+            // INTERNAL RESET BOUNDARY
+            int_phase := PHASE_STARTUP
+            cand_int_price := na
+            tmp_int_SL := na
+            int_SH := na
+            int_SL := na
+            
+        else
+            if low < cand_ext_price
+                cand_ext_price := low
+                cand_ext_bar := bar_index
+                
+            if bullishCount >= 3
+                ext_SL := cand_ext_price
+                ext_SL_bar := cand_ext_bar
+                last_drawn_SL_bar := f_draw_SL(ext_SL_bar, ext_SL, last_drawn_SL_bar)
+                phase := PHASE_RETRACEMENT
+                
+                // INTERNAL RESET BOUNDARY
+                int_phase := PHASE_STARTUP
+                cand_int_price := na
+                tmp_int_SL := na
+                int_SH := na
+                int_SL := na
+
+
+// =============================================================================
+// CONTINUOUS FRACTAL INTERNAL ENGINE
+// Overcomes phase stagnation to capture micro BOS/CHoCH inside choppy retracements
+// =============================================================================
+
+if int_phase == PHASE_STARTUP
+    if na(cand_int_price) or high > cand_int_price
+        cand_int_price := high
+        cand_int_bar := bar_index
+    if na(tmp_int_SL) or low < tmp_int_SL
+        tmp_int_SL := low
+        tmp_int_SL_bar := bar_index
+
+    if bearishCount >= intConfCount
+        // ATR displacement check: leg must be meaningful before stamping ISH
+        intLegSize = cand_int_price - tmp_int_SL
+        if intLegSize >= intAtrMult * atrValue
+            int_trend := 1 
+            int_SH := cand_int_price
+            int_SH_bar := cand_int_bar
+            last_drawn_ISH_bar := f_draw_ISH(int_SH_bar, int_SH, last_drawn_ISH_bar)
+            
+            int_phase := -1 // Switch to Tracking Low
+            cand_int_price := low
+            cand_int_bar := bar_index
+        
+    else if bullishCount >= intConfCount
+        // ATR displacement check: leg must be meaningful before stamping ISL
+        intLegSize = cand_int_price - tmp_int_SL
+        if math.abs(intLegSize) >= intAtrMult * atrValue
+            int_trend := -1 
+            int_SL := tmp_int_SL
+            int_SL_bar := tmp_int_SL_bar
+            last_drawn_ISL_bar := f_draw_ISL(int_SL_bar, int_SL, last_drawn_ISL_bar)
+            
+            int_phase := 1 // Switch to Tracking High
+            cand_int_price := high
+            cand_int_bar := bar_index
+
+else if int_phase == 1 // TRACKING HIGH
+    if high > cand_int_price
+        cand_int_price := high
+        cand_int_bar := bar_index
+        
+    if bearishCount >= intConfCount
+        // Gate: only stamp ISH if leg from last ISL is large enough
+        legFromISL = not na(int_SL) ? cand_int_price - int_SL : cand_int_price - cand_int_price
+        if na(int_SL) or legFromISL >= intAtrMult * atrValue
+            int_SH := cand_int_price
+            int_SH_bar := cand_int_bar
+            last_drawn_ISH_bar := f_draw_ISH(int_SH_bar, int_SH, last_drawn_ISH_bar)
+            
+            // As soon as peak is confirmed, flip to trace bottom
+            int_phase := -1 
+            cand_int_price := low
+            cand_int_bar := bar_index
+
+else if int_phase == -1 // TRACKING LOW
+    if low < cand_int_price
+        cand_int_price := low
+        cand_int_bar := bar_index
+        
+    if bullishCount >= intConfCount
+        // Gate: only stamp ISL if leg from last ISH is large enough
+        legFromISH = not na(int_SH) ? int_SH - cand_int_price : cand_int_price - cand_int_price
+        if na(int_SH) or legFromISH >= intAtrMult * atrValue
+            int_SL := cand_int_price
+            int_SL_bar := cand_int_bar
+            last_drawn_ISL_bar := f_draw_ISL(int_SL_bar, int_SL, last_drawn_ISL_bar)
+            
+            // As soon as valley is confirmed, flip to trace top
+            int_phase := 1 
+            cand_int_price := high
+            cand_int_bar := bar_index
+
+// CONTINUOUS INTERNAL BREAK (BOS/CHoCH) CHECKER
+if not na(int_SH) and not na(int_SL)
+    if int_trend == 1
+        if close > int_SH
+            f_draw_int_break(int_SH_bar, int_SH, bar_index, "iBOS", true)
+            int_trend := 1
+            int_SH := na // Block duplicates until a new internal extreme forms
+        else if close < int_SL
+            f_draw_int_break(int_SL_bar, int_SL, bar_index, "iCHoCH", false)
+            int_trend := -1
+            int_SL := na
+            
+    else if int_trend == -1
+        if close < int_SL
+            f_draw_int_break(int_SL_bar, int_SL, bar_index, "iBOS", false)
+            int_trend := -1
+            int_SL := na
+        else if close > int_SH
+            f_draw_int_break(int_SH_bar, int_SH, bar_index, "iCHoCH", true)
+            int_trend := 1
+            int_SH := na
+
+// =============================================================================
+// TREND CLASSIFICATION ENGINE
+// PRO TREND  = External Structure  (HH/HL vs LH/LL)
+// CURRENT TREND = Internal Structure (HH/HL vs LH/LL)
+// =============================================================================
+
+// --- Inputs ---
+showTrendPanel = input.bool(true, "Show Trend Panel", group = "Trend Classification")
+
+// --- Detect Changes in External Confirmed Swing Points ---
+// ext_SH / ext_SL are var series; they only change on confirmed events
+bool extNewSH = not na(ext_SH) and ext_SH != ext_SH[1]
+bool extNewSL = not na(ext_SL) and ext_SL != ext_SL[1]
+
+// --- Detect Changes in Internal Confirmed Swing Points ---
+// int_SH / int_SL are set on confirmation then cleared to na on break
+// Trigger when a new non-na value appears (different from previous bar's value)
+bool intNewSH = not na(int_SH) and (na(int_SH[1]) or int_SH != int_SH[1])
+bool intNewSL = not na(int_SL) and (na(int_SL[1]) or int_SL != int_SL[1])
+
+// --- External HH / HL / LH / LL Classification ---
+var float prev_ext_SH_val = na
+var float prev_ext_SL_val = na
+var string ext_SH_class   = na   // "HH" or "LH"
+var string ext_SL_class   = na   // "HL" or "LL"
+
+if extNewSH
+    if not na(prev_ext_SH_val)
+        ext_SH_class := ext_SH > prev_ext_SH_val ? "HH" : "LH"
+    prev_ext_SH_val := ext_SH
+
+if extNewSL
+    if not na(prev_ext_SL_val)
+        ext_SL_class := ext_SL > prev_ext_SL_val ? "HL" : "LL"
+    prev_ext_SL_val := ext_SL
+
+// --- Internal HH / HL / LH / LL Classification ---
+var float prev_int_SH_val = na
+var float prev_int_SL_val = na
+var string int_SH_class   = na   // "HH" or "LH"
+var string int_SL_class   = na   // "HL" or "LL"
+
+if intNewSH
+    if not na(prev_int_SH_val)
+        int_SH_class := int_SH > prev_int_SH_val ? "HH" : "LH"
+    prev_int_SH_val := int_SH
+
+if intNewSL
+    if not na(prev_int_SL_val)
+        int_SL_class := int_SL > prev_int_SL_val ? "HL" : "LL"
+    prev_int_SL_val := int_SL
+
+// --- PRO TREND (External Only) ---
+// Initialized from the external engine's trend bias once enough data exists.
+// Updated only when BOTH the latest external SH and SL classifications agree.
+// Mixed signals → hold current trend (no premature flip).
+var string proTrend = "NEUTRAL"
+
+if proTrend == "NEUTRAL" and not na(ext_SH) and not na(ext_SL)
+    proTrend := trend == 1 ? "BULLISH" : "BEARISH"
+
+if not na(ext_SH_class) and not na(ext_SL_class)
+    if ext_SH_class == "HH" and ext_SL_class == "HL"
+        proTrend := "BULLISH"
+    else if ext_SH_class == "LH" and ext_SL_class == "LL"
+        proTrend := "BEARISH"
+    // Mixed (HH + LL or LH + HL) → proTrend holds its previous value
+
+// --- CURRENT TREND (Internal Only) ---
+// Same pattern applied to internal structure.
+var string curTrend = "NEUTRAL"
+
+if curTrend == "NEUTRAL" and not na(int_SH) and not na(int_SL)
+    curTrend := int_trend == 1 ? "BULLISH" : "BEARISH"
+
+if not na(int_SH_class) and not na(int_SL_class)
+    if int_SH_class == "HH" and int_SL_class == "HL"
+        curTrend := "BULLISH"
+    else if int_SH_class == "LH" and int_SL_class == "LL"
+        curTrend := "BEARISH"
+    // Mixed → hold
+
+// --- TREND ALIGNMENT ---
+string alignment = "UNDEFINED"
+if proTrend == "BULLISH" and curTrend == "BULLISH"
+    alignment := "WITH TREND ▲"
+else if proTrend == "BEARISH" and curTrend == "BEARISH"
+    alignment := "WITH TREND ▼"
+else if proTrend == "BULLISH" and curTrend == "BEARISH"
+    alignment := "COUNTER TREND"
+else if proTrend == "BEARISH" and curTrend == "BULLISH"
+    alignment := "COUNTER TREND"
+
+// --- PANEL COLORS ---
+color pnlColBull   = color.new(#00c853, 10)
+color pnlColBear   = color.new(#d50000, 10)
+color pnlColNeut   = color.new(color.gray, 30)
+color pnlColAmber  = color.new(#ff8f00, 15)
+color pnlColHdr    = color.new(#0d1b2a, 5)
+color pnlColRow    = color.new(#0a0e18, 25)
+
+color proCol   = proTrend == "BULLISH" ? pnlColBull : proTrend  == "BEARISH" ? pnlColBear : pnlColNeut
+color curCol   = curTrend == "BULLISH" ? pnlColBull : curTrend  == "BEARISH" ? pnlColBear : pnlColNeut
+color alignCol = alignment == "WITH TREND ▲" or alignment == "WITH TREND ▼" ? pnlColBull :
+                 alignment == "COUNTER TREND" ? pnlColAmber : pnlColNeut
+
+// --- TABLE PANEL ---
+// Created once on bar 0, cells refreshed every bar
+var table trendPanel = table.new(
+     position     = position.top_right,
+     columns      = 1,
+     rows         = 6,
+     bgcolor      = color.new(#0d1b2a, 5),
+     border_color = color.new(color.gray, 55),
+     border_width = 1,
+     frame_color  = color.new(color.gray, 45),
+     frame_width  = 1)
+
+if showTrendPanel
+    table.cell(trendPanel, 0, 0, "⬡  MAX SMC",
+         text_color   = color.new(color.white, 5),
+         text_size    = size.small,
+         bgcolor      = pnlColHdr,
+         text_halign  = text.align_center)
+    table.cell(trendPanel, 0, 1, "PRO TREND",
+         text_color   = color.new(color.silver, 15),
+         text_size    = size.tiny,
+         bgcolor      = pnlColRow,
+         text_halign  = text.align_center)
+    table.cell(trendPanel, 0, 2, proTrend,
+         text_color   = color.white,
+         text_size    = size.small,
+         bgcolor      = proCol,
+         text_halign  = text.align_center)
+    table.cell(trendPanel, 0, 3, "CURRENT TREND",
+         text_color   = color.new(color.silver, 15),
+         text_size    = size.tiny,
+         bgcolor      = pnlColRow,
+         text_halign  = text.align_center)
+    table.cell(trendPanel, 0, 4, curTrend,
+         text_color   = color.white,
+         text_size    = size.small,
+         bgcolor      = curCol,
+         text_halign  = text.align_center)
+    table.cell(trendPanel, 0, 5, alignment,
+         text_color   = color.white,
+         text_size    = size.tiny,
+         bgcolor      = alignCol,
+         text_halign  = text.align_center)

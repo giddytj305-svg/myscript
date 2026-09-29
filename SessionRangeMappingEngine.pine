@@ -1,0 +1,128 @@
+//@version=6
+indicator("MAX SMC — Session Range Mapping Engine", overlay = true, max_boxes_count = 500)
+
+// --- User Inputs ---
+showAsian     = input.bool(true, title = "Show Asian Range")
+showPreLondon = input.bool(true, title = "Show Pre-London")
+showLondon    = input.bool(true, title = "Show London Session")
+showNY        = input.bool(true, title = "Show New York Session")
+
+colorAsian     = input.color(color.new(color.blue, 85), title = "Asian Color")
+colorPreLondon = input.color(color.new(color.yellow, 85), title = "Pre-London Color")
+colorLondon    = input.color(color.new(color.orange, 85), title = "London Color")
+colorNY        = input.color(color.new(color.gray, 85), title = "New York Color")
+
+// --- Define Reference Timezone ---
+string tz = "Africa/Nairobi"
+
+// "1234567" covers all days of the week, inclusive of everything.
+inAsian     = not na(time(timeframe.period, "0200-0800:1234567", tz))
+inPreLondon = not na(time(timeframe.period, "0800-1000:1234567", tz))
+inLondon    = not na(time(timeframe.period, "1000-1900:1234567", tz))
+
+// "1500-0000" naturally rolls over to the stroke of midnight exclusive
+inNY        = not na(time(timeframe.period, "1500-0000:1234567", tz)) 
+
+// --- Session Range Engine: Asian Range ---
+var bool  asianActive = false
+var float asianHigh   = na
+var float asianLow    = na
+var int   asianStart  = na
+var box   asianBox    = na
+
+if inAsian
+    if not asianActive
+        asianActive := true
+        asianHigh   := high
+        asianLow    := low
+        asianStart  := bar_index
+        if showAsian
+            asianBox := box.new(left = asianStart, top = asianHigh, bottom = asianLow, right = bar_index, bgcolor = colorAsian, border_color = color.new(colorAsian, 60))
+    else
+        asianHigh := math.max(asianHigh, high)
+        asianLow  := math.min(asianLow, low)
+        if showAsian
+            box.set_top(asianBox, asianHigh)
+            box.set_bottom(asianBox, asianLow)
+            box.set_right(asianBox, bar_index)
+else
+    if asianActive
+        asianActive := false // End of Asian Range - Extrema FROZEN
+
+// --- Session Range Engine: Pre-London ---
+var bool  preActive = false
+var float preHigh   = na
+var float preLow    = na
+var int   preStart  = na
+var box   preBox    = na
+
+if inPreLondon
+    if not preActive
+        preActive := true
+        preHigh   := high
+        preLow    := low
+        preStart  := bar_index
+        if showPreLondon
+            preBox := box.new(left = preStart, top = preHigh, bottom = preLow, right = bar_index, bgcolor = colorPreLondon, border_color = color.new(colorPreLondon, 60))
+    else
+        preHigh := math.max(preHigh, high)
+        preLow  := math.min(preLow, low)
+        if showPreLondon
+            box.set_top(preBox, preHigh)
+            box.set_bottom(preBox, preLow)
+            box.set_right(preBox, bar_index)
+else
+    if preActive
+        preActive := false // End of Pre-London
+
+// --- Session Range Engine: London ---
+var bool  londonActive = false
+var float londonHigh   = na
+var float londonLow    = na
+var int   londonStart  = na
+var box   londonBox    = na
+
+if inLondon
+    if not londonActive
+        londonActive := true
+        londonHigh   := high
+        londonLow    := low
+        londonStart  := bar_index
+        if showLondon
+            londonBox := box.new(left = londonStart, top = londonHigh, bottom = londonLow, right = bar_index, bgcolor = colorLondon, border_color = color.new(colorLondon, 60))
+    else
+        londonHigh := math.max(londonHigh, high)
+        londonLow  := math.min(londonLow, low)
+        if showLondon
+            box.set_top(londonBox, londonHigh)
+            box.set_bottom(londonBox, londonLow)
+            box.set_right(londonBox, bar_index)
+else
+    if londonActive
+        londonActive := false // End of London - Extrema FROZEN
+
+// --- Session Range Engine: New York ---
+var bool  nyActive = false
+var float nyHigh   = na
+var float nyLow    = na
+var int   nyStart  = na
+var box   nyBox    = na
+
+if inNY
+    if not nyActive
+        nyActive := true
+        nyHigh   := high
+        nyLow    := low
+        nyStart  := bar_index
+        if showNY
+            nyBox := box.new(left = nyStart, top = nyHigh, bottom = nyLow, right = bar_index, bgcolor = colorNY, border_color = color.new(colorNY, 60))
+    else
+        nyHigh := math.max(nyHigh, high)
+        nyLow  := math.min(nyLow, low)
+        if showNY
+            box.set_top(nyBox, nyHigh)
+            box.set_bottom(nyBox, nyLow)
+            box.set_right(nyBox, bar_index)
+else
+    if nyActive
+        nyActive := false // End of New York - Extrema FROZEN
